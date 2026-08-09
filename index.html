@@ -161,6 +161,8 @@ main{max-width:1180px;margin:0 auto;padding:20px 18px 90px}
 .finding.W .body{border-left-color:var(--ochre)}
 .finding.I .body{border-left-color:var(--teal)}
 .finding .head{display:flex;gap:9px;align-items:baseline;flex-wrap:wrap}
+.finding .at{font-family:var(--mono);font-size:10.5px;letter-spacing:.04em;padding:1px 5px;
+  border:1px solid var(--ink);background:var(--ink);color:var(--vellum);margin-left:auto}
 .finding .code{font-family:var(--mono);font-size:10.5px;font-weight:500;letter-spacing:.04em;padding:1px 5px;border:1px solid var(--rule)}
 .finding.E .code{border-color:var(--redline);color:var(--redline)}
 .finding.W .code{border-color:var(--ochre);color:var(--ochre)}
@@ -244,7 +246,7 @@ tr.v-ok td.vd{color:var(--teal)}
 <header class="masthead">
   <div class="masthead-row">
     <h1 data-i="appTitle">Combine Services — Drawing Checker</h1>
-    <span class="sub" id="verline">v2.1 · offline · CSD + MP + FS + AC</span>
+    <span class="sub" id="verline">v2.2 · offline · CSD + MP + FS + AC</span>
     <div class="lang-toggle" role="group" aria-label="Language">
       <button id="btnVI" aria-pressed="true">VI</button>
       <button id="btnEN" aria-pressed="false">EN</button>
@@ -388,6 +390,8 @@ var UI = {
          en:'Scale could not be calibrated — enter lengths manually'},
   clean:{vi:'Không phát hiện vấn đề nào trên sheet này.', en:'No issues found on this sheet.'},
   fixLbl:{vi:'Đề xuất', en:'Action'},
+  atTitle:{vi:'Vị trí theo lưới trục', en:'Location by grid reference'},
+  colAt:{vi:'Trục / Grid', en:'Grid'},
   reading:{vi:'Đang đọc ', en:'Reading '},
   page:{vi:' — trang ', en:' — page '},
   done:{vi:'Xong. ', en:'Done. '},
@@ -516,6 +520,109 @@ function buildBlocks(lines){
     }
   });
   return blocks;
+}
+
+/* ============================================================
+   2b. grid detection — so a comment can name where it is
+   ============================================================ */
+var RE_GRID = /^([A-Z]{1,2}[XY])[-\s]?(\d{1,2})(['\u2019]?)$/;
+
+/* A gridline is labelled at both ends of the plan; the miniature grid inside
+   the key plan is labelled once. Counting occurrences separates the two, which
+   matters because the key plan would otherwise supply a full set of false
+   marks packed a few pixels apart. */
+function detectGrid(items){
+  if(!items || !items.length) return null;
+  var raw = [];
+  items.forEach(function(it){
+    var str = it.s.trim();
+    var m = str.match(RE_GRID);
+    if(m){ raw.push({key:m[1]+m[2]+m[3], fam:m[1], x:it.x, y:it.y}); return; }
+    /* "DY-17DY-17" — the two end labels can arrive glued into one item. */
+    var half = str.length % 2 === 0 ? str.slice(0, str.length/2) : null;
+    if(half && half === str.slice(str.length/2)){
+      var m2 = half.match(RE_GRID);
+      if(m2){
+        raw.push({key:m2[1]+m2[2]+m2[3], fam:m2[1], x:it.x, y:it.y});
+        raw.push({key:m2[1]+m2[2]+m2[3], fam:m2[1], x:it.x, y:it.y});
+      }
+    }
+  });
+  if(raw.length < 4) return null;
+
+  var byKey = {};
+  raw.forEach(function(o){ (byKey[o.key] = byKey[o.key] || []).push(o); });
+  var fams = {};
+  Object.keys(byKey).forEach(function(k){
+    var a = byKey[k];
+    if(a.length < 2) return;
+    var f = a[0].fam;
+    (fams[f] = fams[f] || []).push({
+      key: k,
+      x: a.reduce(function(s,o){ return s+o.x; },0)/a.length,
+      y: a.reduce(function(s,o){ return s+o.y; },0)/a.length
+    });
+  });
+
+  var grid = {};
+  Object.keys(fams).forEach(function(f){
+    var a = fams[f];
+    if(a.length < 2) return;
+    var rng = function(v){
+      return Math.max.apply(null, a.map(function(o){ return o[v]; })) -
+             Math.min.apply(null, a.map(function(o){ return o[v]; }));
+    };
+    var axis = rng('x') > rng('y') ? 'x' : 'y';
+    grid[f] = {axis:axis, marks:a.map(function(o){ return {key:o.key, p:o[axis]}; })
+                              .sort(function(m,n){ return m.p - n.p; })};
+  });
+  var used = {}, out = {};
+  Object.keys(grid).forEach(function(f){
+    if(used[grid[f].axis]) return;      // one family per axis
+    used[grid[f].axis] = true; out[f] = grid[f];
+  });
+  return Object.keys(out).length ? out : null;
+}
+
+/* Turn a set of points into a grid reference such as "DY2–DY3 / DX4–DX5". */
+function gridRef(grid, pts){
+  if(!grid || !pts || !pts.length) return '';
+  var parts = [];
+  Object.keys(grid).forEach(function(f){
+    var g = grid[f], marks = g.marks;
+    if(marks.length < 2) return;
+    var vals = pts.map(function(p){ return g.axis === 'x' ? p.x : p.y; })
+                  .filter(function(v){ return typeof v === 'number' && isFinite(v); });
+    if(!vals.length) return;
+    var lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
+    var span0 = marks[marks.length-1].p - marks[0].p || 1;
+    var name = function(v){
+      /* Beyond the outermost labelled gridline the sheet gives nothing to
+         bracket against, so say so instead of pretending it sits on the line. */
+      if(v < marks[0].p - 0.06*span0) return '<' + marks[0].key;
+      if(v > marks[marks.length-1].p + 0.06*span0) return marks[marks.length-1].key + '+';
+      if(v <= marks[0].p) return marks[0].key;
+      if(v >= marks[marks.length-1].p) return marks[marks.length-1].key;
+      for(var i=0;i<marks.length-1;i++){
+        if(v >= marks[i].p && v <= marks[i+1].p){
+          var span = marks[i+1].p - marks[i].p || 1;
+          var t = (v - marks[i].p) / span;
+          if(t < 0.18) return marks[i].key;
+          if(t > 0.82) return marks[i+1].key;
+          return marks[i].key + '\u2013' + marks[i+1].key;
+        }
+      }
+      return marks[marks.length-1].key;
+    };
+    var a = name(lo), b = name(hi);
+    if(a === b){ parts.push(a); return; }
+    /* A span that reaches into the grid is named by the gridlines it touches;
+       the outside markers only make sense for a single bound. */
+    var lo0 = a.replace(/^</,'').split('\u2013')[0];
+    var hi0 = b.replace(/\+$/,'').split('\u2013').pop();
+    parts.push(lo0 === hi0 ? lo0 : (lo0 + '\u2013' + hi0));
+  });
+  return parts.join(' / ');
 }
 
 /* ============================================================
@@ -739,19 +846,19 @@ function extractMP(blocks, pageNo){
 
     B.lines.forEach(function(L, li){
       allMatches(RE_MP_PIPE, L).forEach(function(m){
-        S.pipes.push({sys:m[1].toUpperCase(), mat:m[2]?m[2].toUpperCase():null, dn:+m[3],
+        S.pipes.push({sys:m[1].toUpperCase(), mat:m[2]?m[2].toUpperCase():null, dn:+m[3], x:B.x, y:B.y,
                       am:B.am, c:B.c, raw:L, blk:bi});
       });
       allMatches(RE_MP_VALVE, L).forEach(function(m){
-        S.valves.push({kind:m[1].toUpperCase(), dn:+m[2], am:B.am, c:B.c, raw:L, blk:bi});
+        S.valves.push({kind:m[1].toUpperCase(), dn:+m[2], am:B.am, c:B.c, x:B.x, y:B.y, raw:L, blk:bi});
       });
       /* Drainage plans state the fall directly as a percentage rather than
          leaving it to be derived from two invert levels. */
       allMatches(RE_MP_SLOPE, L).forEach(function(m){
-        S.slopeLabels.push({pct:parseFloat(m[1]), am:B.am, c:B.c, raw:L, blk:bi});
+        S.slopeLabels.push({pct:parseFloat(m[1]), am:B.am, c:B.c, x:B.x, y:B.y, raw:L, blk:bi});
       });
       allMatches(RE_MP_HH, L).forEach(function(m){
-        S.handholes.push({w:+m[1], d:+m[2], am:B.am, c:B.c, raw:L});
+        S.handholes.push({w:+m[1], d:+m[2], am:B.am, c:B.c, x:B.x, y:B.y, raw:L});
       });
       var got = false;
       allMatches(RE_MP_ELEV, L).forEach(function(m){
@@ -936,11 +1043,14 @@ function extractCSD(blocks, pageNo, fsMode){
 
 /* Pick the grammar before parsing: the two families label the same physical
    thing in incompatible ways, so one regex set cannot serve both. */
-function extract(blocks, pageNo){
-  if(isAC(blocks)) return extractAC(blocks, pageNo);
+function extract(blocks, pageNo, items){
+  var grid = detectGrid(items);
+  var S;
+  if(isAC(blocks)){ S = extractAC(blocks, pageNo); S.grid = grid; return S; }
   var fs = isFS(blocks);
-  if(!fs && isMP(blocks)) return extractMP(blocks, pageNo);
-  var S = extractCSD(blocks, pageNo, fs);
+  if(!fs && isMP(blocks)){ S = extractMP(blocks, pageNo); S.grid = grid; return S; }
+  S = extractCSD(blocks, pageNo, fs);
+  S.grid = grid;
   if(S.services.length || S.pipes.length || S.tags.length){
     if(fs) S.family = 'FS';
   } else {
@@ -952,8 +1062,11 @@ function extract(blocks, pageNo){
 /* ============================================================
    4. rule engine
    ============================================================ */
-function F(code, sev, sheet, vi, en, evid, fixVi, fixEn){
-  return {code:code, sev:sev, sheet:sheet, vi:vi, en:en, evid:evid||'', fixVi:fixVi||'', fixEn:fixEn||''};
+function F(code, sev, sheet, vi, en, evid, fixVi, fixEn, pts){
+  var at = '';
+  try { at = gridRef(sheet && sheet.grid, (pts||[]).filter(function(p){ return p; })); } catch(e){}
+  return {code:code, sev:sev, sheet:sheet, vi:vi, en:en,
+          evid:evid||'', fixVi:fixVi||'', fixEn:fixEn||'', at:at};
 }
 function fmtSvc(s){
   var sz = s.dia ? ('\u00d8'+s.dia) : (s.w+'x'+s.h);
@@ -1007,7 +1120,7 @@ RULES.push(function(S){
         var lbl = o.sys ? (o.sys + (o.dia ? ' \u00d8'+o.dia : (o.w?' '+o.w+'x'+o.h:''))) : 'R-'+o.sys;
         return lbl + '   ' + (o.ref||'') + '=' + o.datum + '+' + o.elev;
       })).slice(0,10).join('\n'),
-      fixVi, fixEn));
+      fixVi, fixEn, bad));
   });
   return out;
 });
@@ -1036,7 +1149,7 @@ RULES.push(function(S){
           : 'Same run '+k.replace('|',' ')+' carries two elevations (+'+s.elev+' vs +'+med+'), '+d+' mm apart, with no transition shown.',
         s.raw.replace(/\n/g,' '),
         digit?'Kiểm tra lại, nhiều khả năng phải là +'+med+'.':'Bổ sung đoạn chuyển cao độ hoặc sửa nhãn.',
-        digit?'Verify — likely should read +'+med+'.':'Add the transition or correct the label.'));
+        digit?'Verify — likely should read +'+med+'.':'Add the transition or correct the label.', [s]));
     });
   });
   return out;
@@ -1056,7 +1169,7 @@ RULES.push(function(S){
         (anySuffix?' Every other multi-module system here carries a .1/.2 suffix; this one does not, so it is unclear whether these are two modules of one system or two separate systems.':''),
       'OU '+id+' \u00d7'+seen[id].length,
       'Đối chiếu equipment schedule: nếu là các mô-đun của cùng một hệ thì thêm hậu tố .1/.2; nếu là hai hệ riêng thì phải đặt hai mã khác nhau (số nhãn ống gas sẽ cho biết là trường hợp nào).',
-      'Check the equipment schedule: if these are modules of one system add a .1/.2 suffix; if they are two systems they need two distinct tags. The refrigerant label count tells you which.'));
+      'Check the equipment schedule: if these are modules of one system add a .1/.2 suffix; if they are two systems they need two distinct tags. The refrigerant label count tells you which.', seen[id]));
   });
   return out;
 });
@@ -1103,9 +1216,9 @@ RULES.push(function(S){
    sẽ bị kéo vào cụm +1800 và cảnh báo mất ý nghĩa. */
 RULES.push(function(S){
   var items = S.services.filter(function(s){ return s.elev!=null && s.elev >= 800; })
-    .map(function(s){ return {fam:s.sys, elev:s.elev, txt:fmtSvc(s)}; })
+    .map(function(s){ return {fam:s.sys, elev:s.elev, txt:fmtSvc(s), src:s}; })
     .concat(S.pipes.filter(function(p){ return p.elev!=null && p.elev >= 800; })
-      .map(function(p){ return {fam:'R (ống gas)', elev:p.elev,
+      .map(function(p){ return {fam:'R (ống gas)', elev:p.elev, src:p,
         txt:'R-'+p.sys+' ('+p.liq+'/'+p.gas+') '+(p.ref||'BOP')+':'+(p.datum||'')+'+'+p.elev}; }));
   if(items.length < 3) return [];
   items.sort(function(a,b){ return a.elev - b.elev; });
@@ -1126,7 +1239,8 @@ RULES.push(function(S){
       C.length+' tuyến thuộc '+fams.length+' hệ khác nhau ('+fams.join(', ')+') cùng nằm trong dải cao độ đáy +'+lo+' \u2192 +'+hi+' mm. Mặt bằng không đủ để chứng minh chúng không đụng nhau.',
       C.length+' runs from '+fams.length+' systems ('+fams.join(', ')+') share the +'+lo+' to +'+hi+' mm bottom-elevation band. The plan alone cannot prove they clear each other.',
       C.map(function(o){ return o.txt; }).join('\n'),
-      'Bổ sung mặt cắt qua vùng này.','Add a section through this area.'));
+      'Bổ sung mặt cắt qua vùng này.','Add a section through this area.',
+      C.map(function(o){ return o.src; })));
   });
   return out;
 });
@@ -1198,7 +1312,7 @@ RULES.push(function(S){
       noElev.length+' service label(s) carry a size but no elevation.',
       uniq(noElev.map(function(s){ return fmtSvc(s); })).slice(0,12).join('\n'),
       'Bổ sung cao độ (BOD/BOC/BOP) cho các nhãn này.',
-      'Add the BOD/BOC/BOP elevation to these labels.'));
+      'Add the BOD/BOC/BOP elevation to these labels.', noElev));
   }
   var noData = S.tags.filter(function(T){ return ['EF','PEF','SME'].indexOf(T.type)>=0 && (!T.cmh || !T.pa); });
   if(noData.length){
@@ -1234,7 +1348,7 @@ RULES.push(function(S){
       (named.length?(' The remaining labels do carry a code ('+uniq(named.map(function(v){return v.sys;})).join(', ')+'), so the sheet is inconsistent.'):''),
     sizes.join(', '),
     'Bổ sung mã hệ vào nhãn (ví dụ BS 100A thay vì 100A).',
-    'Add the system code to the label (e.g. BS 100A instead of 100A).')];
+    'Add the system code to the label (e.g. BS 100A instead of 100A).', bare)];
 });
 
 /* R11 — dịch vụ sát mặt sàn/mái */
@@ -1247,7 +1361,7 @@ RULES.push(function(S){
     lowU.length+' run(s) sit close to the roof deck (bottom below +250 mm). Support plinths, waterproofing protection and roof drainage need a detail.',
     lowU.slice(0,14).join('\n'),
     'Bổ sung chi tiết chân đỡ (sleeper) và xác nhận không cản thoát nước.',
-    'Add the sleeper/plinth detail and confirm drainage is not blocked.')];
+    'Add the sleeper/plinth detail and confirm drainage is not blocked.', low)];
 });
 
 /* R12 — tỷ lệ A1 vs nhãn view A3 */
@@ -1720,14 +1834,16 @@ RULES_MP.push(function(S){
       zero.length+' of '+S.slopeLabels.length+' slope labels read 0.0% on drainage runs. With no fall the pipe will not self-drain and will silt up.',
       uniq(zero.map(function(z){ return z.sys + (z.dn?(' \u00d8'+z.dn):'') + '  \u2014  0.0%'; })).slice(0,12).join('\n'),
       'Kiểm tra lại: nếu là ống thoát thì phải có độ dốc; nếu là ống đứng hoặc ống áp lực thì bỏ nhãn % để khỏi gây hiểu nhầm.',
-      'Verify: a gravity drain needs a fall; if the run is a stack or under pressure, remove the % label so it does not mislead.'));
+      'Verify: a gravity drain needs a fall; if the run is a stack or under pressure, remove the % label so it does not mislead.',
+      zero.map(function(z){ return z.sl; })));
   }
   if(shallow.length){
     out.push(F('MP-09','W',S,
       shallow.length+' tuyến có độ dốc thấp hơn mức tối thiểu theo đường kính.',
       shallow.length+' run(s) fall below the minimum slope for their diameter.',
       uniq(shallow.map(function(z){ return z.sys+' \u00d8'+z.dn+'  \u2014  '+z.sl.pct+'% (tối thiểu '+z.min+'%)'; })).slice(0,12).join('\n'),
-      'Đối chiếu TCVN 4474 và yêu cầu của chủ đầu tư.','Check against TCVN 4474 and the client requirement.'));
+      'Đối chiếu TCVN 4474 và yêu cầu của chủ đầu tư.','Check against TCVN 4474 and the client requirement.',
+      shallow.map(function(z){ return z.sl; })));
   }
   var ok = S.slopeLabels.length - zero.length - shallow.length;
   if(ok > 0){
@@ -1947,7 +2063,9 @@ function render(){
           '<div class="stamp">'+String(i+1).padStart(2,'0')+'</div>' +
           '<div class="body">' +
             '<div class="head"><span class="code">'+esc(f.code)+'</span>' +
-            '<span class="title">'+esc(codeTitle(f.code))+'</span></div>' +
+            '<span class="title">'+esc(codeTitle(f.code))+'</span>' +
+            (f.at ? '<span class="at" title="'+esc(t('atTitle'))+'">'+esc(f.at)+'</span>' : '') +
+            '</div>' +
             '<div class="detail">'+esc(body)+'</div>' +
             (f.evid ? '<div class="evid">'+esc(f.evid)+'</div>' : '') +
             (fix ? '<div class="fix"><b>'+esc(t('fixLbl'))+'</b> '+esc(fix)+'</div>' : '') +
@@ -2245,7 +2363,7 @@ function exportXlsx(){
   rows.push({cells:[{v:'COMMENT SHEET — COMBINE SERVICES DRAWING REVIEW', s:1}]});
   rows.push({cells:[{v:'Ngày lập / Date: '+stamp+'   ·   Số sheet / Sheets: '+SHEETS.length, s:0}]});
   rows.push({cells:[
-    {v:'No.',s:2},{v:'Sheet / DWG No.',s:2},{v:'Zone',s:2},{v:'Code',s:2},{v:'Mức / Level',s:2},
+    {v:'No.',s:2},{v:'Sheet / DWG No.',s:2},{v:'Zone',s:2},{v:'Trục / Grid',s:2},{v:'Code',s:2},{v:'Mức / Level',s:2},
     {v:'Hạng mục / Item',s:2},{v:'Nhận xét (VN)',s:2},{v:'Comment (EN)',s:2},
     {v:'Dẫn chứng / Evidence',s:2},{v:'Đề xuất / Action',s:2},{v:'Trạng thái / Status',s:2},{v:'Ghi chú / Remarks',s:2}
   ], h:30});
@@ -2257,6 +2375,7 @@ function exportXlsx(){
         {v:String(n), s:4},
         {v:(S.dwg || ('Page '+S.page)) + ' [' + S.family + ']', s:3},
         {v:S.zone != null ? S.label : (S.subLabel || '\u2014'), s:4},
+        {v:f.at || '\u2014', s:4},
         {v:f.code, s:4},
         {v:SEV_TXT[f.sev].vi+' / '+SEV_TXT[f.sev].en, s:4},
         {v:codeTitleBoth(f.code), s:3},
@@ -2304,7 +2423,7 @@ function exportXlsx(){
     });
   }
 
-  var widths = [5, 22, 9, 8, 15, 22, 46, 46, 30, 34, 14, 16];
+  var widths = [5, 22, 9, 14, 8, 15, 22, 46, 46, 30, 34, 14, 16];
   var blob = buildXlsx(rows, widths, 'Comment Sheet');
   var a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -2377,7 +2496,7 @@ async function handleFiles(list){
         var items  = normaliseItems(tc.items);
         var lines  = buildLines(items);
         var blocks = buildBlocks(lines);
-        var S = extract(blocks, p);
+        var S = extract(blocks, p, items);
         if(files.length > 1) S.file = file.name;
         /* A page that parses to nothing used to vanish, leaving the person
            staring at a zero. Keep it and say why it could not be read. */

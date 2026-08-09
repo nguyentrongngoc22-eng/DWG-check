@@ -60,7 +60,7 @@ Sau khi cài, app chạy được cả khi mất mạng — toàn bộ pdf.js v�
 Máy đã cài sẽ giữ bản cũ trong cache nếu không đổi số phiên bản. Mỗi lần thay `index.html`, **phải sửa luôn dòng đầu trong `sw.js`**:
 
 ```js
-const CACHE = 'csd-checker-v2.0.0';   →   'csd-checker-v2.1.0'
+const CACHE = 'csd-checker-v2.2.0';   →   'csd-checker-v2.3.0'
 ```
 
 Không đổi dòng này thì máy đã cài sẽ tiếp tục chạy bản cũ.
@@ -79,6 +79,14 @@ App nhận 4 họ bản vẽ, tự phân loại và hiện ở ô **TYPE**:
 | **AC** | Sơ đồ nguyên lý VRF | `OU 1-5 [RAS-62CNBCMQ]` · `f28.58mm` |
 
 Thả **nhiều file cùng lúc** để chạy các phép đối chiếu chéo — ví dụ sơ đồ VRF với mặt bằng mái sẽ so số mô-đun từng hệ.
+
+### Vị trí theo lưới trục
+
+Mỗi nhận xét gắn với một vị trí cụ thể được ghi ở góc phải, dạng `DX4–DX5 / DY2`, và có cột **Trục / Grid** riêng trong file Excel. App tự đọc nhãn trục trên bản vẽ và loại bỏ lưới của key plan trong khung tên.
+
+Ký hiệu: `DY2` nằm sát trục · `DY2–DY3` nằm giữa hai trục · `DY16+` nằm ngoài trục cuối · `<DY1` nằm trước trục đầu.
+
+Nhận xét ở mức toàn sheet (tỷ lệ, ngày phát hành, đối chiếu giữa các sheet) không có vị trí nên để dấu `—`. Bản vẽ không có nhãn trục, ví dụ sơ đồ nguyên lý VRF, cũng để trống.
 
 ### Giới hạn
 
