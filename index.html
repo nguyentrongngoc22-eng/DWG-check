@@ -244,7 +244,7 @@ tr.v-ok td.vd{color:var(--teal)}
 <header class="masthead">
   <div class="masthead-row">
     <h1 data-i="appTitle">Combine Services — Drawing Checker</h1>
-    <span class="sub" id="verline">v2.0 · offline · CSD + MP + FS + AC</span>
+    <span class="sub" id="verline">v2.1 · offline · CSD + MP + FS + AC</span>
     <div class="lang-toggle" role="group" aria-label="Language">
       <button id="btnVI" aria-pressed="true">VI</button>
       <button id="btnEN" aria-pressed="false">EN</button>
@@ -541,12 +541,18 @@ var MONTHS   = ['JANUARY','FEBRUARY','MARCH','APRIL','MAY','JUNE','JULY','AUGUST
    A different drawing family: the material code sits between the system and the
    size (WW- UPVC-110), elevations hang below a floor datum with "=" or nothing
    at all (BOP=B.1FL-2420, B.1FL -2945), and manholes use TOM/BOM.            */
-var MP_SYS  = 'WW|WS|SW|RW|PW|CW|HW|VW|W|V|D|SD|FD';
+/* Longest codes first: PWW must win over WW, WSD over WS. */
+var MP_SYS  = 'PWW|WSD|ACD|SVP|WW|WS|SW|RW|PW|CW|HW|VW|SD|FD|W|V|D';
 var MP_MAT  = 'UPVC|uPVC|PVC|PPR|PPRC|HDPE|PE|CI|GI|CS|SUS';
-var RE_MP_PIPE = new RegExp('\\b('+MP_SYS+')\\s*[-:\\s]{0,3}\\s*('+MP_MAT+')\\s*[-\\s]\\s*(\\d{1,4})\\b','gi');
+/* The material code is optional — plans write "WW- 160", sections write
+   "WW- UPVC-110". The dash after the system code is what keeps this from
+   matching stray words followed by a number. */
+var RE_MP_PIPE = new RegExp('\\b('+MP_SYS+')\\s*-\\s*(?:('+MP_MAT+')\\s*[-\\s]\\s*)?(\\d{1,4})\\b','g');
+var RE_MP_SLOPE = /(\d{1,2}(?:\.\d)?)\s*%/g;
+var RE_MP_HH   = /\b(?:HANDHOLE-WxD:|HH-)(\d{2,4})\s*[xX]\s*(\d{2,4})/g;
 var RE_MP_VALVE= /\b(GV|BV|CV|SV|FV|PRV|NRV)\s*[-:\s]{1,3}(\d{1,4})\b/g;
 var RE_MP_ELEV = /\b(BOP|TOP|BOM|TOM|BOT|IL|BOD|BOC)\s*[:=]\s*([A-Z0-9.]{0,4}FL)\s*([+-])\s*(\d{1,5})/g;
-var RE_MP_BARE = /(^|[^A-Z0-9.])([A-Z]\.?\d?FL)\s*([+-])\s*(\d{1,5})\b/g;
+var RE_MP_BARE = /(^|[^A-Z0-9.])([A-Z]?\.?\d?FL)\s*([+-])\s*(\d{1,5})\b/g;
 /* ---- fire-fighting / electrical (FS) grammar -------------------------------
    Confirmed against the sheet legend: BS is the fire fighting pipe (black
    steel). Sizes are written DN32, 100A or 300x100, and elevations use "=" with
@@ -714,6 +720,7 @@ function extractMP(blocks, pageNo){
   var S = {
     family:'MP', page:pageNo, dwg:null, zone:null, a1:null, a3:null, months:[],
     services:[], pipes:[], tags:[], fans:[], valves:[], elevs:[], views:[],
+    slopeLabels:[], handholes:[],
     cal:null, blocks:blocks.length,
     rawText:blocks.map(function(B){ return B.lines.join(' \u00b7 '); })
   };
@@ -732,11 +739,19 @@ function extractMP(blocks, pageNo){
 
     B.lines.forEach(function(L, li){
       allMatches(RE_MP_PIPE, L).forEach(function(m){
-        S.pipes.push({sys:m[1].toUpperCase(), mat:m[2].toUpperCase(), dn:+m[3],
+        S.pipes.push({sys:m[1].toUpperCase(), mat:m[2]?m[2].toUpperCase():null, dn:+m[3],
                       am:B.am, c:B.c, raw:L, blk:bi});
       });
       allMatches(RE_MP_VALVE, L).forEach(function(m){
         S.valves.push({kind:m[1].toUpperCase(), dn:+m[2], am:B.am, c:B.c, raw:L, blk:bi});
+      });
+      /* Drainage plans state the fall directly as a percentage rather than
+         leaving it to be derived from two invert levels. */
+      allMatches(RE_MP_SLOPE, L).forEach(function(m){
+        S.slopeLabels.push({pct:parseFloat(m[1]), am:B.am, c:B.c, raw:L, blk:bi});
+      });
+      allMatches(RE_MP_HH, L).forEach(function(m){
+        S.handholes.push({w:+m[1], d:+m[2], am:B.am, c:B.c, raw:L});
       });
       var got = false;
       allMatches(RE_MP_ELEV, L).forEach(function(m){
@@ -1673,6 +1688,58 @@ RULES_MP.push(function(S){
     'Bổ sung tỷ lệ cho từng mặt cắt.','Add the scale to each section.')];
 });
 
+/* MP-08 — độ dốc ghi thẳng trên bản vẽ */
+RULES_MP.push(function(S){
+  if(!S.slopeLabels.length) return [];
+  var DRAIN = /^(WW|PWW|SW|RW|WSD|ACD|SD|FD|D)$/;
+  var zero = [], shallow = [], byPipe = {};
+
+  S.slopeLabels.forEach(function(SL){
+    /* Attach each percentage to the nearest pipe label so a 0% on a vent or a
+       supply line is not reported as a drainage defect. */
+    var best = null, bd = Infinity;
+    S.pipes.forEach(function(P){
+      if(P.am == null || P.c == null) return;
+      var d = Math.hypot(P.am - SL.am, P.c - SL.c);
+      if(d < bd){ bd = d; best = P; }
+    });
+    SL.pipe = best;
+    var sys = best ? best.sys : null;
+    if(sys) byPipe[sys] = (byPipe[sys]||0) + 1;
+    if(!sys || !DRAIN.test(sys)) return;
+    var dn = best.dn || 0;
+    var min = dn >= 150 ? 0.5 : (dn >= 100 ? 1.0 : 2.0);
+    if(SL.pct === 0) zero.push({sl:SL, sys:sys, dn:dn});
+    else if(SL.pct < min) shallow.push({sl:SL, sys:sys, dn:dn, min:min});
+  });
+
+  var out = [];
+  if(zero.length){
+    out.push(F('MP-08','E',S,
+      zero.length+'/'+S.slopeLabels.length+' nhãn độ dốc ghi 0.0% trên tuyến thoát nước. Ống thoát không có độ dốc thì nước không tự chảy, gây đọng và tắc.',
+      zero.length+' of '+S.slopeLabels.length+' slope labels read 0.0% on drainage runs. With no fall the pipe will not self-drain and will silt up.',
+      uniq(zero.map(function(z){ return z.sys + (z.dn?(' \u00d8'+z.dn):'') + '  \u2014  0.0%'; })).slice(0,12).join('\n'),
+      'Kiểm tra lại: nếu là ống thoát thì phải có độ dốc; nếu là ống đứng hoặc ống áp lực thì bỏ nhãn % để khỏi gây hiểu nhầm.',
+      'Verify: a gravity drain needs a fall; if the run is a stack or under pressure, remove the % label so it does not mislead.'));
+  }
+  if(shallow.length){
+    out.push(F('MP-09','W',S,
+      shallow.length+' tuyến có độ dốc thấp hơn mức tối thiểu theo đường kính.',
+      shallow.length+' run(s) fall below the minimum slope for their diameter.',
+      uniq(shallow.map(function(z){ return z.sys+' \u00d8'+z.dn+'  \u2014  '+z.sl.pct+'% (tối thiểu '+z.min+'%)'; })).slice(0,12).join('\n'),
+      'Đối chiếu TCVN 4474 và yêu cầu của chủ đầu tư.','Check against TCVN 4474 and the client requirement.'));
+  }
+  var ok = S.slopeLabels.length - zero.length - shallow.length;
+  if(ok > 0){
+    out.push(F('MP-10','I',S,
+      ok+'/'+S.slopeLabels.length+' nhãn độ dốc đạt yêu cầu. Hố ga/hố kiểm tra đọc được: '+S.handholes.length+'.',
+      ok+' of '+S.slopeLabels.length+' slope labels are acceptable. Handholes read: '+S.handholes.length+'.',
+      uniq(S.slopeLabels.map(function(x){ return x.pct+'%'; })).join(', '),'',''));
+  }
+  return out;
+});
+
+
 /* ---- slope worksheet -------------------------------------------------------
    Which levels belong to which run, and in what order, cannot be read from the
    text: leader lines separate a level from its pipe, and on these sheets the
@@ -1918,6 +1985,9 @@ var CODE_TITLES = {
   'AC-09':{vi:'Hệ chỉ có ở một bộ',en:'System on one set only'},
   'AC-10':{vi:'Lệch số mô-đun',en:'Module count mismatch'},
   'AC-11':{vi:'Đối chiếu sơ đồ ↔ mặt bằng',en:'Schematic vs plan check'},
+  'MP-08':{vi:'Độ dốc bằng 0',en:'Zero fall'},
+  'MP-09':{vi:'Độ dốc dưới tối thiểu',en:'Below minimum fall'},
+  'MP-10':{vi:'Độ dốc đạt',en:'Fall acceptable'},
   'NA-01':{vi:'Không nhận ra nhãn',en:'Labels not recognised'},
   'EL-01':{vi:'Gốc cao độ',en:'Elevation datum'},
   'EL-02':{vi:'Nghi gõ thiếu chữ số',en:'Suspected dropped digit'},
@@ -2375,8 +2445,6 @@ document.getElementById('btnEN').addEventListener('click', function(){ LANG='en'
 applyLang();
 </script>
 <script>
-/* Registered only over https / localhost; opening the file directly from disk
-   still works, just without the install prompt. */
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   window.addEventListener('load', function () {
     navigator.serviceWorker.register('./sw.js').catch(function (e) {
