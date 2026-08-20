@@ -2,6 +2,9 @@
 
 > Công cụ kiểm tra bản vẽ MEP từ lớp text PDF, chạy hoàn toàn trong trình duyệt.
 > Dự án: Olympus Vietnam New Building Construction Project.
+>
+> **Cập nhật v2.3** — phần "Điểm cần lưu ý" ở mục 6 đã được xử lý: app nay
+> đọc được nét vẽ vector và đã có bộ kiểm thử tự động. Xem mục 8 ở cuối.
 
 Bản đánh giá này dựa trên toàn bộ mã nguồn (`index.html`, `sw.js`, `manifest.webmanifest`, `README.md`).
 
@@ -15,7 +18,7 @@ Bản đánh giá này dựa trên toàn bộ mã nguồn (`index.html`, `sw.js`
 | Kích thước | `index.html` ~1.7 MB (chủ yếu là font woff2 nhúng + pdf.js) |
 | Logic ứng dụng | ~114 KB code JS thuần, không framework, không build step |
 | Phụ thuộc ngoài | pdf.js (Mozilla) nhúng sẵn; **không có** thư viện khác, **không** gọi mạng khi chạy |
-| Đầu vào | Nhiều file PDF (kéo-thả hoặc chọn), đọc **lớp text**, không đọc nét vẽ |
+| Đầu vào | Nhiều file PDF (kéo-thả hoặc chọn), đọc **lớp text**; từ v2.3 đọc thêm **nét vẽ vector** (mục 8) |
 | Đầu ra | Comment sheet `.xlsx` (tự viết ZIP/XLSX, không dùng SheetJS) + text thô `.txt` |
 | Ngôn ngữ UI | Song ngữ VI/EN |
 
@@ -109,3 +112,57 @@ Không có lỗi nghiêm trọng. Các điểm dưới đây là nhỏ hoặc ma
 | Khả năng bảo trì (test/versioning) | ★★★☆☆ |
 
 **Khuyến nghị ưu tiên**: (1) thêm bộ test fixture từ text thô để chống hồi quy; (2) tự động hóa việc bump version của service worker. Ngoài ra ứng dụng đã sẵn sàng dùng thực tế.
+
+
+---
+
+## 8. Cập nhật v2.3 — đọc nét vẽ vector
+
+Hai khuyến nghị ưu tiên ở mục 7 đã được thực hiện, cùng với việc mở rộng phạm vi
+sang nét vẽ.
+
+### Đã làm
+
+| Việc | Kết quả |
+|---|---|
+| **Đọc nét vẽ vector** | Qua `page.getOperatorList()` của pdf.js — nét vẽ CAD là dữ liệu vector nên đọc trực tiếp, không cần OCR, giữ nguyên cam kết offline |
+| **Ngăn xếp ma trận** | Xử lý `cm` (CTM) và form XObject `/Matrix`, đúng cách bản vẽ CAD thật lồng nội dung |
+| **Gắn nhãn ↔ tuyến** | Mỗi nhãn hệ thống được nối với tuyến gần nhất trong bán kính vài lần chiều cao chữ |
+| **Đo chiều dài thật** | Theo tỷ lệ tự hiệu chuẩn từ chuỗi kích thước của chính sheet |
+| **Va chạm 2.5D (`GX-01`/`GX-02`)** | Cắt nhau trên mặt bằng (từ nét) + chồng cao độ (từ nhãn), kèm vị trí lưới trục |
+| **Khung xem lại nét vẽ** | Canvas trong drawer: xám = nét đọc được, đen = tuyến có nhãn, vòng tròn = điểm giao |
+| **Bộ kiểm thử tự động** | `tests/run.js` — 25 assertion trên 2 bản vẽ mẫu có kích thước biết trước |
+
+### Cách lọc nhiễu — điểm thiết kế đáng ghi nhận
+
+Bản đánh giá ban đầu dự đoán "phần khó nhất không phải đọc nét, mà là lọc
+nhiễu". Lời giải chọn dùng tránh được bài toán đó thay vì đối đầu: **chỉ những
+tuyến có nhãn gắn vào mới tham gia kiểm tra**. Hatching, khung tên, đường kích
+thước vẫn được đọc nhưng không nhãn nào nhận, nên tự động bị bỏ qua — không cần
+phân loại nét, không cần ngưỡng đoán mò.
+
+### Bộ test đã chứng minh giá trị ngay lập tức
+
+Trong lần chạy đầu, test bắt được một lỗi thật: trường neo `h` (chiều cao chữ)
+ghi đè lên `h` (chiều cao ống), biến `900x700` thành `900x8` và làm sai toàn bộ
+phép kiểm va chạm. Lỗi này sẽ không lộ ra qua kiểm tra bằng mắt vì app vẫn chạy
+và vẫn xuất báo cáo — chỉ có con số là sai.
+
+### Đánh giá lại
+
+| Tiêu chí | Trước | Sau |
+|---|---|---|
+| Kiến trúc & tổ chức mã | ★★★★★ | ★★★★★ |
+| Chất lượng miền (rule MEP) | ★★★★★ | ★★★★★ |
+| Bảo mật & riêng tư | ★★★★★ | ★★★★★ (không đổi — vẫn không gọi mạng) |
+| UX / giao diện | ★★★★☆ | ★★★★★ (khung xem lại nét vẽ giúp kiểm chứng) |
+| Khả năng bảo trì | ★★★☆☆ | ★★★★☆ (đã có test; version SW vẫn bump tay) |
+
+### Còn lại
+
+- **Chưa kiểm chứng trên bản vẽ thật** — toàn bộ test chạy trên bản vẽ tổng hợp.
+  Nét vẽ CAD thật lộn xộn hơn nhiều (ống gió vẽ 2 nét song song, leader line dài,
+  block lồng nhau). Khung xem lại nét vẽ chính là công cụ để đánh giá điều này.
+- Các điểm nhỏ ở mục 6 (ternary chết `AC-09`, `slice` sau `xesc`, rule vận tốc
+  gió chỉ chạy với 1 quạt) vẫn chưa xử lý.
+- Version service worker vẫn phải bump thủ công.
