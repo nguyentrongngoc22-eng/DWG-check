@@ -149,6 +149,45 @@ async function load(browser, base, pdf) {
   ck('sheet without linework says so', d.bareSaysSo, true);
   ck('sheet without linework draws nothing', d.bareNoCanvas, false);
 
+  /* ---- 5. electrical containment vocabulary ---------------------------
+     The strings below are copied verbatim from a real lighting shop drawing
+     (OVNC-MP-E-LT-005/006/007), which read as zero labels before this. */
+  console.log('\n== electrical containment ==');
+  const el = await page.evaluate(() => {
+    const mk = lines => ({ lines: lines, text: lines.join('\n'), flat: lines.join(' '),
+      x: 100, y: 100, a0: 0, a1: 60, am: 30, c: 100, h: 8, b: 0 });
+    const blocks = [
+      mk(['CABLE RACK 200x100-H.D.G', 'BOC=1FL+2200']),
+      mk(['TRUNKING 100x100-H.D.G', 'BOT=2FL+3000']),
+      mk(['CABLE FOR EXTERIOR LIGHTING', 'IN HDPE D30']),
+      mk(['PVC PIPE \u00d820']),
+      mk(['STEEL BOX 100x100x50', 'GALVANIZED'])       // a box, not a run
+    ];
+    const S = extractCSD(blocks, 1, isFS(blocks));
+    return {
+      isFS: isFS(blocks),
+      svc: S.services.map(s => ({ sys: s.sys, w: s.w, h: s.h, dia: s.dia,
+                                  mat: s.mat || null, ref: s.ref, elev: s.elev })),
+      dwg: extractCSD([mk(['OVNC-MP-E-LT-005'])], 1, false).dwg
+    };
+  });
+  const bySys = {};
+  el.svc.forEach(s => bySys[s.sys] = s);
+  ck('lighting sheet is recognised as FS', el.isFS, true);
+  ck('cable rack read with its size', bySys['CABLE RACK'] &&
+    [bySys['CABLE RACK'].w, bySys['CABLE RACK'].h], [200, 100]);
+  ck('hot-dip galvanized kept as the finish', bySys['CABLE RACK'] &&
+    bySys['CABLE RACK'].mat, 'HDG');
+  ck('cable rack level paired from the line below', bySys['CABLE RACK'] &&
+    [bySys['CABLE RACK'].ref, bySys['CABLE RACK'].elev], ['BOC', 2200]);
+  ck('trunking read with its level', bySys['TRUNKING'] &&
+    [bySys['TRUNKING'].w, bySys['TRUNKING'].h, bySys['TRUNKING'].elev], [100, 100, 3000]);
+  ck('bare-D conduit read', bySys['HDPE'] && bySys['HDPE'].dia, 30);
+  ck('diameter-sign conduit read', bySys['PVC'] && bySys['PVC'].dia, 20);
+  ck('a junction box is not a run', el.svc.some(s => s.w === 100 && s.h === 100 &&
+    s.sys !== 'TRUNKING'), false);
+  ck('drawing number reads outside the CSD series', el.dwg, 'OVNC-MP-E-LT-005');
+
   await browser.close();
   server.close();
   console.log(fails === 0 ? '\nALL PASS' : `\n${fails} FAILURE(S)`);

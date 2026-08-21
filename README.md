@@ -76,6 +76,7 @@ App nhận 4 họ bản vẽ, tự phân loại và hiện ở ô **TYPE**:
 | **CSD** | Mặt bằng combine services | `SM_SED : 900x700` · `BOD:RFL+1800` |
 | **MP** | Mặt cắt cấp thoát nước | `WW- UPVC-110` · `BOP=B.1FL-2420` |
 | **FS** | Phòng cháy + điện + ELV | `BS DN32` · `CR 200x100` · `BOC=1FL+2400` |
+| **EL** | Điện / chiếu sáng (containment) | `CABLE RACK 200x100-H.D.G` · `TRUNKING 100x100` · `BOT=2FL+3000` · `HDPE D30` |
 | **AC** | Sơ đồ nguyên lý VRF | `OU 1-5 [RAS-62CNBCMQ]` · `f28.58mm` |
 
 Thả **nhiều file cùng lúc** để chạy các phép đối chiếu chéo — ví dụ sơ đồ VRF với mặt bằng mái sẽ so số mô-đun từng hệ.
@@ -87,6 +88,19 @@ Mỗi nhận xét gắn với một vị trí cụ thể được ghi ở góc p
 Ký hiệu: `DY2` nằm sát trục · `DY2–DY3` nằm giữa hai trục · `DY16+` nằm ngoài trục cuối · `<DY1` nằm trước trục đầu.
 
 Nhận xét ở mức toàn sheet (tỷ lệ, ngày phát hành, đối chiếu giữa các sheet) không có vị trí nên để dấu `—`. Bản vẽ không có nhãn trục, ví dụ sơ đồ nguyên lý VRF, cũng để trống.
+
+### Bản vẽ điện / chiếu sáng (từ v2.4)
+
+Bản vẽ điện không dùng mã hai chữ cái như bản vẽ cơ hay PCCC — nó **viết đủ chữ**:
+`CABLE RACK 200x100-H.D.G`, `TRUNKING 100x100-H.D.G`, với cao độ ở dòng dưới
+(`BOC=1FL+2200`). App đọc được các nhãn này, giữ hậu tố hoàn thiện (H.D.G =
+hot-dip galvanized) làm vật liệu, và đọc cả ống luồn dây viết theo đường kính
+(`PVC PIPE Ø20`, `IN HDPE D30`).
+
+Hộp nối **không** bị tính là tuyến: `100x100x50` có ba kích thước nên bị loại,
+khác với máng `100x100`.
+
+Số hiệu bản vẽ nay đọc được cả ngoài dải CSD (`OVNC-MP-E-LT-005`).
 
 ### Nét vẽ và va chạm (từ v2.3)
 

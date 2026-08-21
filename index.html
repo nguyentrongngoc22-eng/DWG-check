@@ -254,7 +254,7 @@ canvas.geo{display:block;width:100%;height:auto}
 <header class="masthead">
   <div class="masthead-row">
     <h1 data-i="appTitle">Combine Services — Drawing Checker</h1>
-    <span class="sub" id="verline">v2.3 · offline · CSD + MP + FS + AC · linework</span>
+    <span class="sub" id="verline">v2.4 · offline · CSD + MP + FS + AC + EL · linework</span>
     <div class="lang-toggle" role="group" aria-label="Language">
       <button id="btnVI" aria-pressed="true">VI</button>
       <button id="btnEN" aria-pressed="false">EN</button>
@@ -901,7 +901,10 @@ var RE_PIPE  = /\bR\s*[-\u2013]?\s*(\d{1,3})\s*\(\s*([\d.]+)\s*\/\s*([\d.]+)\s*\
 var RE_TAG   = /^(OU|PEF|SME|EF|FCU|AHU)[ \n]+([A-Z0-9][A-Z0-9.\-]{0,10})(?:[ \n]|$)/;
 var RE_CMH   = /(\d{2,6})\s*CMH/i;
 var RE_PA    = /(\d{1,5})\s*PA\b/i;
-var RE_DWG   = /\b(OVNC[-A-Z0-9.]*CSD[-0-9.]+)/i;
+/* Sheets outside the combined-services set carry the same numbering with a
+   different discipline in the middle (…-E-LT-005 for lighting), so keying on
+   "CSD" left every one of them with no drawing number at all. */
+var RE_DWG   = /\b(OVNC[-A-Z0-9.]*[-.]\d{2,4})\b/i;
 var RE_A1    = /A1\s*:?\s*1\s*\/\s*(\d{1,4})/i;
 var RE_A3    = /\(\s*A3\s*\)\s*:?\s*1\s*\/\s*(\d{1,4})/i;
 var RE_ZONE  = /ZONE\s*([1-9])/i;
@@ -934,6 +937,32 @@ var RE_FS_DN   = new RegExp('\\b('+FS_SYS+')\\s*[-:\\s]{0,3}(?:DN\\s*(\\d{2,4})|
 var RE_FS_TRK  = new RegExp('\\b('+FS_SYS+')\\s*[-:\\s]{0,3}(?:TRUNKING|TRAY|LADDER)?\\s*(\\d{2,4})\\s*[xX\u00d7]\\s*(\\d{2,4})','gi');
 
 var RE_FS_BARE = /(?:^|[^0-9A-Za-z])(?:DN\s*(\d{2,4})|(\d{2,3})\s*A)(?![0-9A-Za-z])/g;
+
+/* ---- electrical containment ------------------------------------------------
+   Lighting and power shop drawings do not use a two-letter code the way the
+   fire and mechanical sheets do — they write the containment out in words:
+   "CABLE RACK 200x100-H.D.G", "TRUNKING 100x100-H.D.G", with the level on the
+   line below as BOC/BOT. The trailing token is the finish, not part of the
+   size: H.D.G is hot-dip galvanized.
+
+   The third-dimension guard is what keeps a junction box out of the run list.
+   A tray is written 100x100; a box on the same sheet is 100x100x50, and
+   without the guard every box becomes a run with a length and a clash. */
+var EL_TRAY = 'CABLE\\s+RACK|CABLE\\s+TRAY|CABLE\\s+LADDER|CABLE\\s+DUCT|' +
+              'TRUNKING|RACEWAY|WIREWAY|BUSDUCT|BUSWAY';
+var EL_FIN  = 'H\\.?D\\.?G|HDG|GALVANIZED|GALV|PVC|SUS|EG|PG';
+var RE_EL_TRAY = new RegExp(
+  '\\b(' + EL_TRAY + ')\\s*[-:\\s]{0,3}(\\d{2,4})\\s*[xX×]\\s*(\\d{2,4})' +
+  '(?!\\s*[xX×]\\s*\\d)' +
+  '(?:\\s*-\\s*(' + EL_FIN + '))?', 'gi');
+
+/* Conduit carries its material rather than a system code, and the diameter is
+   written either as a diameter sign or a bare D: "PVC PIPE Ø20", "IN HDPE D30". */
+var EL_MAT = 'HDPE|UPVC|PVC|EMT|IMC|RSC|GI|SUS|STEEL|FLEXIBLE';
+var RE_EL_COND = new RegExp(
+  '\\b(' + EL_MAT + ')\\s*(?:FLEXIBLE\\s*)?(?:PIPE|CONDUIT|DUCT)?\\s*' +
+  '[ØøD]\\s*(\\d{2,3})(?![0-9A-Za-z])', 'gi');
+
 
 /* ---- VRF refrigerant piping schematic (AC family) --------------------------
    A schematic, not a plan: no elevations at all. What it does carry is the
@@ -1029,8 +1058,12 @@ function isFS(blocks){
      switch family — they appear on other sheets too. */
   var strong = 0, bare = 0;
   var sysRe = new RegExp('\\b('+FS_SYS+')\\s*[-:\\s]{0,3}(DN\\s*\\d|\\d{2,4}\\s*A\\b|\\d{2,4}\\s*[xX]\\s*\\d{2,4})');
+  /* A lighting sheet never carries a two-letter code, so without this the
+     family test can never fire on one. */
+  var elRe = new RegExp('\\b('+EL_TRAY+')\\s*[-:\\s]{0,3}\\d{2,4}\\s*[xX\u00d7]\\s*\\d{2,4}', 'i');
   blocks.forEach(function(B){
     if(sysRe.test(B.flat)) strong++;
+    if(elRe.test(B.flat)) strong++;
     if(/\b(BOT|BOC|BOP)\s*=\s*\d?FL\s*\+/.test(B.flat)) strong++;
     if(/(?:^|[^0-9A-Za-z])(?:DN\s*\d{2,4}|\d{2,3}\s*A)(?![0-9A-Za-z])/.test(B.flat)) bare++;
   });
@@ -1249,6 +1282,23 @@ function extractCSD(blocks, pageNo, fsMode){
       }
       allMatches(RE_FS_TRK, L).forEach(function(m){
         S.services.push({sys:m[1].toUpperCase(), w:+m[2], h:+m[3], dia:null,
+                         ref:e?e.ref:null, datum:e?e.datum:null, elev:e?e.v:null,
+                         x:B.x, y:B.y, th:B.h, raw:L});
+      });
+
+      /* Written-out containment: the name is the system, the finish rides
+         along as the material so the comment can quote the label as drawn. */
+      allMatches(RE_EL_TRAY, L).forEach(function(m){
+        S.services.push({sys:m[1].replace(/\s+/g,' ').toUpperCase(), w:+m[2], h:+m[3], dia:null,
+                         /* Periods out: the finish is a field to compare on, and the
+                            sheet writes it both H.D.G and HDG. The label as drawn
+                            survives untouched in raw. */
+                         mat:m[4] ? m[4].toUpperCase().replace(/\./g,'') : null,
+                         ref:e?e.ref:null, datum:e?e.datum:null, elev:e?e.v:null,
+                         x:B.x, y:B.y, th:B.h, raw:L});
+      });
+      allMatches(RE_EL_COND, L).forEach(function(m){
+        S.services.push({sys:m[1].toUpperCase(), w:null, h:null, dia:+m[2],
                          ref:e?e.ref:null, datum:e?e.datum:null, elev:e?e.v:null,
                          x:B.x, y:B.y, th:B.h, raw:L});
       });
