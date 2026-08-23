@@ -1,6 +1,6 @@
 # CSD Drawing Checker
 
-Công cụ kiểm tra bản vẽ MEP từ lớp text của file PDF. Chạy hoàn toàn trong trình duyệt — không gửi bản vẽ đi đâu, không cần mạng sau lần tải đầu.
+Công cụ kiểm tra bản vẽ MEP từ lớp text **và nét vẽ vector** của file PDF. Chạy hoàn toàn trong trình duyệt — không gửi bản vẽ đi đâu, không cần mạng sau lần tải đầu.
 
 Dự án: Olympus Vietnam New Building Construction Project.
 
@@ -76,6 +76,7 @@ App nhận 4 họ bản vẽ, tự phân loại và hiện ở ô **TYPE**:
 | **CSD** | Mặt bằng combine services | `SM_SED : 900x700` · `BOD:RFL+1800` |
 | **MP** | Mặt cắt cấp thoát nước | `WW- UPVC-110` · `BOP=B.1FL-2420` |
 | **FS** | Phòng cháy + điện + ELV | `BS DN32` · `CR 200x100` · `BOC=1FL+2400` |
+| **EL** | Điện / chiếu sáng (containment) | `CABLE RACK 200x100-H.D.G` · `TRUNKING 100x100` · `BOT=2FL+3000` · `HDPE D30` |
 | **AC** | Sơ đồ nguyên lý VRF | `OU 1-5 [RAS-62CNBCMQ]` · `f28.58mm` |
 
 Thả **nhiều file cùng lúc** để chạy các phép đối chiếu chéo — ví dụ sơ đồ VRF với mặt bằng mái sẽ so số mô-đun từng hệ.
@@ -88,10 +89,44 @@ Ký hiệu: `DY2` nằm sát trục · `DY2–DY3` nằm giữa hai trục · `D
 
 Nhận xét ở mức toàn sheet (tỷ lệ, ngày phát hành, đối chiếu giữa các sheet) không có vị trí nên để dấu `—`. Bản vẽ không có nhãn trục, ví dụ sơ đồ nguyên lý VRF, cũng để trống.
 
+### Nét vẽ và va chạm
+
+App đọc cả **nét vẽ vector** của file PDF, không chỉ lớp chữ. Với bản vẽ xuất từ
+CAD, nét vẽ là dữ liệu vector nên đọc được trực tiếp — không cần OCR, không cần
+mạng, vẫn chạy offline như cũ.
+
+Từ đó mỗi nhãn không còn là một điểm mà thành **một tuyến**:
+
+- **Đo chiều dài thật** — theo tỷ lệ tự hiệu chuẩn từ chuỗi kích thước trên chính
+  sheet đó. Cột *Dài (mm)* trong bảng dữ liệu.
+- **Phát hiện va chạm (2.5D)** — hai tuyến khác hệ **cắt nhau trên mặt bằng** và
+  **chồng nhau theo phương đứng** (cao độ lấy từ nhãn BOD/TOD, chiều cao lấy từ
+  chính kích thước ống) thì báo lỗi `GX-01`, kèm vị trí theo lưới trục. Khe hở
+  đứng dưới 100 mm báo cảnh báo `GX-02`. Bấm vào nhận xét để xem **đúng điểm giao
+  trên bản vẽ**.
+
+Ô **Runs** trên khung tên hiện `số nhãn gắn được / tổng số tuyến đọc được`.
+
+### Bản vẽ điện / chiếu sáng
+
+Bản vẽ điện không dùng mã hai chữ cái như bản vẽ cơ hay PCCC — nó **viết đủ chữ**:
+`CABLE RACK 200x100-H.D.G`, `TRUNKING 100x100-H.D.G`, với cao độ ở dòng dưới
+(`BOC=1FL+2200`). App đọc được các nhãn này, giữ hậu tố hoàn thiện (H.D.G =
+hot-dip galvanized) làm vật liệu, và đọc cả ống luồn dây viết theo đường kính
+(`PVC PIPE Ø20`, `IN HDPE D30`).
+
+Hộp nối **không** bị tính là tuyến: `100x100x50` có ba kích thước nên bị loại,
+khác với máng `100x100`.
+
 ### Giới hạn
 
 - Chỉ đọc **chữ ghi chú**, không đọc nét vẽ. Không tự phát hiện va chạm hình học — chỉ khoanh vùng các tuyến cùng dải cao độ để người kiểm tra soi mặt cắt.
-- PDF scan (không có lớp text) không đọc được.
+- Chỉ những tuyến **gắn được nhãn** mới tham gia kiểm tra. Tuyến không nhãn được
+  đọc nhưng không dùng — đó cũng là cách app tự lọc nhiễu (hatching, khung tên,
+  đường kích thước) mà không cần đoán.
+- Va chạm là **2.5D**, không phải 3D: mặt bằng lấy từ nét vẽ, cao độ lấy từ chữ
+  trên nhãn. Tuyến không ghi cao độ thì không kiểm được.
+- PDF scan (không có lớp text lẫn nét vector) không đọc được.
 - Bản vẽ giá đỡ, trần phản chiếu, bố trí chung không mang nhãn hệ thống nên nằm ngoài phạm vi — app sẽ báo rõ thay vì im lặng.
 
 Đây là bộ lọc sơ cấp, không thay thế việc review bản vẽ.
@@ -115,6 +150,17 @@ Việc cắt thực hiện ở mức chuỗi chứ không bỏ cả khối, vì 
 ### Gặp bản vẽ app không nhận ra
 
 Bấm **Xuất text thô (.txt)** — file này chứa toàn bộ chuỗi ký tự app đọc được, chỉ vài chục KB, đủ để bổ sung quy ước ghi chú mới mà không phải gửi cả bản vẽ.
+
+---
+
+## Kiểm thử
+
+```bash
+node tests/run.js
+```
+
+Chạy app thật trong Chromium headless, đối chiếu với bản vẽ mẫu có kích thước
+biết trước. Chi tiết trong `tests/README.md`.
 
 ---
 

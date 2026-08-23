@@ -3,7 +3,7 @@
  * Bump CACHE when you publish a new build, otherwise phones that already
  * installed the app keep serving the old index.html from cache forever.
  */
-const CACHE = 'csd-checker-v2.5.0';
+const CACHE = 'csd-checker-v2.6.0';
 
 const ASSETS = [
   './',

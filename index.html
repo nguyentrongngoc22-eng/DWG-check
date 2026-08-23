@@ -143,7 +143,7 @@ main{max-width:1180px;margin:0 auto;padding:20px 18px 90px}
 .tblock .name{padding:12px 14px}
 .tblock .name .t{font-family:var(--disp);font-weight:600;font-size:17px;text-transform:uppercase;letter-spacing:.03em;line-height:1.15}
 .tblock .name .z{font-family:var(--mono);font-size:11px;color:var(--ink-3);margin-top:2px}
-.tbgrid{display:grid;grid-template-columns:repeat(4,minmax(58px,auto));border-left:1px solid var(--rule)}
+.tbgrid{display:grid;grid-template-columns:repeat(5,minmax(52px,auto));border-left:1px solid var(--rule)}
 .tbgrid div{border-right:1px solid var(--rule);padding:7px 9px;text-align:center}
 .tbgrid div:last-child{border-right:0}
 .tbgrid .k{font-family:var(--disp);font-weight:600;font-size:9px;text-transform:uppercase;letter-spacing:.11em;color:var(--ink-3)}
@@ -273,7 +273,7 @@ tr.v-ok td.vd{color:var(--teal)}
 <header class="masthead">
   <div class="masthead-row">
     <h1 data-i="appTitle">Combine Services — Drawing Checker</h1>
-    <span class="sub" id="verline">v2.5 · offline · CSD + MP + FS + AC</span>
+    <span class="sub" id="verline">v2.6 · offline · CSD + MP + FS + AC + EL · linework</span>
     <div class="lang-toggle" role="group" aria-label="Language">
       <button id="btnVI" aria-pressed="true">VI</button>
       <button id="btnEN" aria-pressed="false">EN</button>
@@ -455,6 +455,7 @@ var UI = {
   done:{vi:'Xong. ', en:'Done. '},
   noText:{vi:'Không có lớp text — nhiều khả năng là PDF scan. Không kiểm tra được.', en:'No text layer — likely a scanned PDF. Cannot be checked.'},
   dataDrawer:{vi:'Dữ liệu bóc được từ sheet', en:'Data extracted from sheet'},
+  colLen:{vi:'Dài (mm)', en:'Length (mm)'},
   err:{vi:'Không đọc được file: ', en:'Could not read file: '}
 };
 function t(k){ var e = UI[k]; return e ? (e[LANG]||e.vi) : k; }
@@ -807,6 +808,255 @@ function isChrome(B){
 }
 
 /* ============================================================
+   2d. linework — the drawing's vector geometry
+   ------------------------------------------------------------
+   The text layer says what a run is but never where it goes. A CAD export also
+   carries the lines themselves as vectors, and pdf.js hands them over as
+   drawing operators, so the geometry is there without OCR and without breaking
+   the offline promise.
+
+   Two things follow. A label stops being a point and becomes a run with a
+   measurable length. And two runs can be tested for an actual crossing instead
+   of merely sharing an elevation band — the difference between "check the
+   section" and "these two cross here".
+
+   Coordinates stay in PDF user space, the same space getTextContent reports
+   and the same space the viewer converts from, so a label, a line and a
+   finding box all compare without a mapping.
+   ============================================================ */
+
+/* A sheet is mostly noise: hatching, dimension ticks, the frame, the key plan.
+   Rather than classify it, only runs that a label actually claims are ever
+   used — everything else is read and then ignored. */
+var GEO_MIN_LEN  = 4;      // user units; shorter than this is a tick, not a run
+var GEO_MAX_LINE = 40000;  // hard cap so a pathological sheet cannot hang the tab
+
+/* PDF matrices, row-vector convention: p' = p x M. Composition matches
+   ctx.transform(), i.e. the new matrix applies before the ones already set. */
+function mulM(m, n){
+  return [
+    m[0]*n[0] + m[2]*n[1],
+    m[1]*n[0] + m[3]*n[1],
+    m[0]*n[2] + m[2]*n[3],
+    m[1]*n[2] + m[3]*n[3],
+    m[0]*n[4] + m[2]*n[5] + m[4],
+    m[1]*n[4] + m[3]*n[5] + m[5]
+  ];
+}
+function applyM(m, x, y){
+  return [m[0]*x + m[2]*y + m[4], m[1]*x + m[3]*y + m[5]];
+}
+function hex2(v){
+  v = Math.max(0, Math.min(255, v|0)).toString(16);
+  return v.length < 2 ? '0'+v : v;
+}
+function rgbHex(r,g,b){ return '#' + hex2(r) + hex2(g) + hex2(b); }
+
+/* Bezier segments are elbows and bends. Six samples is far below the accuracy
+   the elevation figures themselves carry, and keeps the point count sane. */
+function flattenCubic(sub, x0,y0, x1,y1, x2,y2, x3,y3){
+  for(var i=1;i<=6;i++){
+    var t = i/6, u = 1-t;
+    var a = u*u*u, b = 3*u*u*t, c = 3*u*t*t, d = t*t*t;
+    sub.push([a*x0 + b*x1 + c*x2 + d*x3, a*y0 + b*y1 + c*y2 + d*y3]);
+  }
+}
+
+async function readGeometry(page){
+  var OPS = pdfjsLib.OPS, ol;
+  try { ol = await page.getOperatorList(); }
+  catch(e){ return null; }
+
+  var fns = ol.fnArray, args = ol.argsArray;
+  var ctm = [1,0,0,1,0,0], stack = [];
+  var col = '#000000', lw = 1, dash = false;
+  var cur = [], lines = [], clipped = false;
+
+  function push(){ stack.push([ctm, col, lw, dash]); }
+  function pop(){ var s = stack.pop(); if(s){ ctm=s[0]; col=s[1]; lw=s[2]; dash=s[3]; } }
+
+  function emit(){
+    for(var i=0;i<cur.length;i++){
+      var pts = cur[i];
+      if(pts.length < 2) continue;
+      if(lines.length >= GEO_MAX_LINE){ clipped = true; return; }
+      var len = 0, x0=pts[0][0], x1=x0, y0=pts[0][1], y1=y0;
+      for(var k=1;k<pts.length;k++){
+        var px = pts[k][0], py = pts[k][1];
+        len += Math.hypot(px - pts[k-1][0], py - pts[k-1][1]);
+        if(px<x0) x0=px; if(px>x1) x1=px;
+        if(py<y0) y0=py; if(py>y1) y1=py;
+      }
+      if(len < GEO_MIN_LEN) continue;
+      lines.push({id:lines.length, pts:pts, len:len, col:col, lw:lw, dash:dash,
+                  x0:x0, x1:x1, y0:y0, y1:y1});
+    }
+  }
+
+  function buildPath(a){
+    var ops = a[0], c = a[1], j = 0, sub = null, sx = 0, sy = 0;
+    var open = function(p){ sub = [p]; cur.push(sub); sx = p[0]; sy = p[1]; };
+    for(var k=0;k<ops.length;k++){
+      var op = ops[k], p;
+      if(op === OPS.moveTo){
+        p = applyM(ctm, c[j], c[j+1]); j += 2; open(p);
+      } else if(op === OPS.lineTo){
+        p = applyM(ctm, c[j], c[j+1]); j += 2;
+        if(!sub) open(p); else sub.push(p);
+      } else if(op === OPS.curveTo || op === OPS.curveTo2 || op === OPS.curveTo3){
+        /* c/v/y differ only in which control point is implied by the current
+           point or the endpoint. */
+        var n = op === OPS.curveTo ? 6 : 4, raw = [];
+        for(var q=0;q<n;q+=2) raw.push(applyM(ctm, c[j+q], c[j+q+1]));
+        j += n;
+        if(!sub) open(raw[0]);
+        var cp = sub[sub.length-1], c1, c2, e;
+        if(op === OPS.curveTo){ c1 = raw[0]; c2 = raw[1]; e = raw[2]; }
+        else if(op === OPS.curveTo2){ c1 = cp; c2 = raw[0]; e = raw[1]; }
+        else { c1 = raw[0]; c2 = raw[1]; e = raw[1]; }
+        flattenCubic(sub, cp[0],cp[1], c1[0],c1[1], c2[0],c2[1], e[0],e[1]);
+      } else if(op === OPS.closePath){
+        if(sub && sub.length > 1) sub.push([sx, sy]);
+      } else if(op === OPS.rectangle){
+        var x = c[j], y = c[j+1], w = c[j+2], h = c[j+3]; j += 4;
+        var r = [applyM(ctm,x,y), applyM(ctm,x+w,y), applyM(ctm,x+w,y+h),
+                 applyM(ctm,x,y+h)];
+        r.push(r[0]);
+        sub = r; cur.push(sub); sx = r[0][0]; sy = r[0][1];
+      }
+    }
+  }
+
+  for(var i=0;i<fns.length;i++){
+    var fn = fns[i], a = args[i];
+    if(fn === OPS.save) push();
+    else if(fn === OPS.restore) pop();
+    else if(fn === OPS.transform) ctm = mulM(ctm, a);
+    else if(fn === OPS.paintFormXObjectBegin){
+      /* CAD exports wrap blocks in form XObjects; the matrix that positions the
+         block has to ride the same stack or every line inside lands in the
+         wrong place. */
+      push();
+      if(a && a[0] && a[0].length === 6) ctm = mulM(ctm, a[0]);
+    }
+    else if(fn === OPS.paintFormXObjectEnd) pop();
+    else if(fn === OPS.setLineWidth) lw = a[0];
+    else if(fn === OPS.setDash) dash = !!(a[0] && a[0].length);
+    else if(fn === OPS.setStrokeRGBColor) col = rgbHex(a[0], a[1], a[2]);
+    else if(fn === OPS.setGState){
+      var g = a[0] || [];
+      for(var gi=0; gi<g.length; gi++){
+        if(g[gi][0] === 'LW') lw = g[gi][1];
+        else if(g[gi][0] === 'D') dash = !!(g[gi][1] && g[gi][1][0] && g[gi][1][0].length);
+      }
+    }
+    else if(fn === OPS.constructPath) buildPath(a);
+    else if(fn === OPS.stroke || fn === OPS.closeStroke || fn === OPS.fillStroke ||
+            fn === OPS.eoFillStroke || fn === OPS.closeFillStroke ||
+            fn === OPS.closeEOFillStroke){ emit(); cur = []; }
+    else if(fn === OPS.fill || fn === OPS.eoFill || fn === OPS.endPath){
+      /* A filled shape is a symbol, an arrowhead or solid hatch — never a run,
+         so it is dropped rather than measured. */
+      cur = [];
+    }
+    if(clipped) break;
+  }
+
+  var span = 0;
+  lines.forEach(function(L){ span += L.len; });
+  return {lines:lines, total:lines.length, span:span, clipped:clipped};
+}
+
+/* ---- geometry helpers ---------------------------------------------------- */
+function distToSeg(px, py, ax, ay, bx, by){
+  var dx = bx-ax, dy = by-ay, L2 = dx*dx + dy*dy;
+  if(L2 === 0) return Math.hypot(px-ax, py-ay);
+  var t = ((px-ax)*dx + (py-ay)*dy) / L2;
+  t = t < 0 ? 0 : (t > 1 ? 1 : t);
+  return Math.hypot(px - (ax + t*dx), py - (ay + t*dy));
+}
+function distToLine(L, px, py){
+  var best = Infinity;
+  for(var i=1;i<L.pts.length;i++){
+    var d = distToSeg(px, py, L.pts[i-1][0], L.pts[i-1][1], L.pts[i][0], L.pts[i][1]);
+    if(d < best) best = d;
+  }
+  return best;
+}
+function segCross(p1,p2,p3,p4){
+  var d1x = p2[0]-p1[0], d1y = p2[1]-p1[1];
+  var d2x = p4[0]-p3[0], d2y = p4[1]-p3[1];
+  var den = d1x*d2y - d1y*d2x;
+  if(Math.abs(den) < 1e-9) return null;           // parallel
+  var ox = p3[0]-p1[0], oy = p3[1]-p1[1];
+  var t = (ox*d2y - oy*d2x) / den;
+  var u = (ox*d1y - oy*d1x) / den;
+  if(t < 0 || t > 1 || u < 0 || u > 1) return null;
+  return {x: p1[0] + t*d1x, y: p1[1] + t*d1y};
+}
+function lineCross(A, B){
+  /* The bounding boxes reject the vast majority of pairs before any
+     per-segment arithmetic runs. */
+  if(A.x1 < B.x0 || B.x1 < A.x0 || A.y1 < B.y0 || B.y1 < A.y0) return null;
+  for(var i=1;i<A.pts.length;i++){
+    for(var j=1;j<B.pts.length;j++){
+      var p = segCross(A.pts[i-1], A.pts[i], B.pts[j-1], B.pts[j]);
+      if(p) return p;
+    }
+  }
+  return null;
+}
+
+/* Tie each labelled service to the run it annotates. A leader line puts the
+   text to one side of its pipe, so the anchor is matched to the nearest run
+   within a few text heights; anything further away is left unbound rather than
+   guessed, because a wrong pairing produces a confident wrong clash. */
+function bindGeometry(S){
+  if(!S.geom || !S.geom.lines.length) return;
+  var lines = S.geom.lines;
+  var all = (S.services||[]).concat(S.pipes||[]);
+  var bound = 0;
+  all.forEach(function(o){
+    if(typeof o.x !== 'number' || typeof o.y !== 'number') return;
+    /* Anchor height is the TEXT height, kept as `th` — a service's own `h` is
+       the duct's physical height and must never be shadowed by it. */
+    var reach = 6 * (o.th || 8);
+    var best = null, bd = Infinity;
+    for(var i=0;i<lines.length;i++){
+      var L = lines[i];
+      if(L.len < GEO_MIN_LEN) continue;
+      if(o.x < L.x0 - reach || o.x > L.x1 + reach ||
+         o.y < L.y0 - reach || o.y > L.y1 + reach) continue;
+      var d = distToLine(L, o.x, o.y);
+      if(d < bd - 0.5 || (Math.abs(d - bd) <= 0.5 && best && L.len > best.len)){
+        bd = Math.min(d, bd); best = L;
+      }
+    }
+    if(best && bd <= reach){ o.line = best; o.lineDist = bd; bound++; }
+  });
+  S.geom.bound = bound;
+}
+
+/* Real length of a bound run, in millimetres, using the scale the sheet's own
+   dimension chain calibrated. Without a calibration there is no honest number
+   to give, so it returns null rather than a figure in the wrong unit. */
+function runLengthMm(S, o){
+  if(!o || !o.line || !S.cal) return null;
+  return Math.round(o.line.len * S.cal.mmPerUnit);
+}
+
+/* Vertical extent of a run, from its elevation tag and its own depth. BOD/BOP
+   sit at the bottom of the run, TOD/TOC/TOP at the top; getting that backwards
+   moves the whole run by its own height. */
+function vExtent(s){
+  if(s.elev == null) return null;
+  var d = s.dia ? s.dia : (s.h || 0);
+  if(!d) return null;
+  if(/^TO/.test(s.ref || '')) return {lo: s.elev - d, hi: s.elev};
+  return {lo: s.elev, hi: s.elev + d};
+}
+
+/* ============================================================
    3. entity extraction
    ============================================================ */
 var SYSTEMS = ['LV SYSTEM','AC_FAD','AC_SAD','AC_RAD','VE_FAD','VE_SAD','VE_EAD','SM_SED','SM_SSD',
@@ -819,7 +1069,10 @@ var RE_PIPE  = /\bR\s*[-\u2013]?\s*(\d{1,3})\s*\(\s*([\d.]+)\s*\/\s*([\d.]+)\s*\
 var RE_TAG   = /^(OU|PEF|SME|EF|FCU|AHU)[ \n]+([A-Z0-9][A-Z0-9.\-]{0,10})(?:[ \n]|$)/;
 var RE_CMH   = /(\d{2,6})\s*CMH/i;
 var RE_PA    = /(\d{1,5})\s*PA\b/i;
-var RE_DWG   = /\b(OVNC[-A-Z0-9.]*CSD[-0-9.]+)/i;
+/* Sheets outside the combined-services set carry the same numbering with a
+   different discipline in the middle (…-E-LT-005 for lighting), so keying on
+   "CSD" left every one of them with no drawing number at all. */
+var RE_DWG   = /\b(OVNC[-A-Z0-9.]*[-.]\d{2,4})\b/i;
 var RE_A1    = /A1\s*:?\s*1\s*\/\s*(\d{1,4})/i;
 var RE_A3    = /\(\s*A3\s*\)\s*:?\s*1\s*\/\s*(\d{1,4})/i;
 var RE_ZONE  = /ZONE\s*([1-9])/i;
@@ -852,6 +1105,36 @@ var RE_FS_DN   = new RegExp('\\b('+FS_SYS+')\\s*[-:\\s]{0,3}(?:DN\\s*(\\d{2,4})|
 var RE_FS_TRK  = new RegExp('\\b('+FS_SYS+')\\s*[-:\\s]{0,3}(?:TRUNKING|TRAY|LADDER)?\\s*(\\d{2,4})\\s*[xX\u00d7]\\s*(\\d{2,4})','gi');
 
 var RE_FS_BARE = /(?:^|[^0-9A-Za-z])(?:DN\s*(\d{2,4})|(\d{2,3})\s*A)(?![0-9A-Za-z])/g;
+
+/* ---- electrical containment ------------------------------------------------
+   Lighting and power shop drawings do not use a two-letter code the way the
+   fire and mechanical sheets do — they write the containment out in words,
+   with the level on the line below:
+
+       CABLE RACK 200x100-H.D.G          TRUNKING 100x100-H.D.G
+       BOC=1FL+2200                      BOT=2FL+3000
+
+   The trailing token is the finish, not part of the size: H.D.G is hot-dip
+   galvanized. CABLE LADDER is deliberately absent — section 2c treats that
+   wording as legend text, and one of the two has to win.
+
+   The third-dimension guard is what keeps a junction box out of the run list.
+   A tray is written 100x100; a box on the same sheet is 100x100x50, and
+   without the guard every box becomes a run with a length and a clash. */
+var EL_TRAY = 'CABLE\\s+RACK|CABLE\\s+TRAY|CABLE\\s+DUCT|TRUNKING|RACEWAY|' +
+              'WIREWAY|BUSDUCT|BUSWAY';
+var EL_FIN  = 'H\\.?D\\.?G|HDG|GALVANIZED|GALV|PVC|SUS|EG|PG';
+var RE_EL_TRAY = new RegExp(
+  '\\b(' + EL_TRAY + ')\\s*[-:\\s]{0,3}(\\d{2,4})\\s*[xX×]\\s*(\\d{2,4})' +
+  '(?!\\s*[xX×]\\s*\\d)' +
+  '(?:\\s*-\\s*(' + EL_FIN + '))?', 'gi');
+
+/* Conduit carries its material rather than a system code, and the diameter is
+   written either as a diameter sign or a bare D: "PVC PIPE Ø20", "IN HDPE D30". */
+var EL_MAT = 'HDPE|UPVC|PVC|EMT|IMC|RSC|GI|SUS|STEEL|FLEXIBLE';
+var RE_EL_COND = new RegExp(
+  '\\b(' + EL_MAT + ')\\s*(?:FLEXIBLE\\s*)?(?:PIPE|CONDUIT|DUCT)?\\s*' +
+  '[ØøD]\\s*(\\d{2,3})(?![0-9A-Za-z])', 'gi');
 
 /* ---- VRF refrigerant piping schematic (AC family) --------------------------
    A schematic, not a plan: no elevations at all. What it does carry is the
@@ -894,7 +1177,7 @@ function extractAC(blocks, pageNo){
       S.systems.push({tag:m[1], model:m[2], mods:[], cool:null, x:B.x, y:B.y, bb:B.bb});
     });
     allMatches(RE_AC_MOD, flat).forEach(function(m){
-      S.tags.push({type:'MOD', id:'RAS-'+m[1], hp:+m[1], x:B.x, y:B.y, bb:B.bb,
+      S.tags.push({type:'MOD', id:'RAS-'+m[1], hp:+m[1], x:B.x, y:B.y, bb:B.bb, th:B.h,
                    inOu:/\bOU\s+\d+-\d+\s*\[/.test(flat)});
     });
     allMatches(RE_AC_IDU, flat).forEach(function(m){
@@ -951,8 +1234,12 @@ function isFS(blocks){
      switch family — they appear on other sheets too. */
   var strong = 0, bare = 0;
   var sysRe = new RegExp('\\b('+FS_SYS+')\\s*[-:\\s]{0,3}(DN\\s*\\d|\\d{2,4}\\s*A\\b|\\d{2,4}\\s*[xX]\\s*\\d{2,4})');
+  /* A lighting sheet never carries a two-letter code, so without this the
+     family test can never fire on one. */
+  var elRe = new RegExp('\\b('+EL_TRAY+')\\s*[-:\\s]{0,3}\\d{2,4}\\s*[xX\u00d7]\\s*\\d{2,4}', 'i');
   blocks.forEach(function(B){
     if(sysRe.test(B.flat)) strong++;
+    if(elRe.test(B.flat)) strong++;
     if(/\b(BOT|BOC|BOP)\s*=\s*\d?FL\s*\+/.test(B.flat)) strong++;
     if(/(?:^|[^0-9A-Za-z])(?:DN\s*\d{2,4}|\d{2,3}\s*A)(?![0-9A-Za-z])/.test(B.flat)) bare++;
   });
@@ -1034,19 +1321,19 @@ function extractMP(blocks, pageNo){
       if(L !== L0) S.chrome.push(L0);
       if(!L) return;
       allMatches(RE_MP_PIPE, L).forEach(function(m){
-        S.pipes.push({sys:m[1].toUpperCase(), mat:m[2]?m[2].toUpperCase():null, dn:+m[3], x:B.x, y:B.y, bb:B.bb,
+        S.pipes.push({sys:m[1].toUpperCase(), mat:m[2]?m[2].toUpperCase():null, dn:+m[3], x:B.x, y:B.y, bb:B.bb, th:B.h,
                       am:B.am, c:B.c, raw:L, blk:bi});
       });
       allMatches(RE_MP_VALVE, L).forEach(function(m){
-        S.valves.push({kind:m[1].toUpperCase(), dn:+m[2], am:B.am, c:B.c, x:B.x, y:B.y, bb:B.bb, raw:L, blk:bi});
+        S.valves.push({kind:m[1].toUpperCase(), dn:+m[2], am:B.am, c:B.c, x:B.x, y:B.y, bb:B.bb, th:B.h, raw:L, blk:bi});
       });
       /* Drainage plans state the fall directly as a percentage rather than
          leaving it to be derived from two invert levels. */
       allMatches(RE_MP_SLOPE, L).forEach(function(m){
-        S.slopeLabels.push({pct:parseFloat(m[1]), am:B.am, c:B.c, x:B.x, y:B.y, bb:B.bb, raw:L, blk:bi});
+        S.slopeLabels.push({pct:parseFloat(m[1]), am:B.am, c:B.c, x:B.x, y:B.y, bb:B.bb, th:B.h, raw:L, blk:bi});
       });
       allMatches(RE_MP_HH, L).forEach(function(m){
-        S.handholes.push({w:+m[1], d:+m[2], am:B.am, c:B.c, x:B.x, y:B.y, bb:B.bb, raw:L});
+        S.handholes.push({w:+m[1], d:+m[2], am:B.am, c:B.c, x:B.x, y:B.y, bb:B.bb, th:B.h, raw:L});
       });
       var got = false;
       allMatches(RE_MP_ELEV, L).forEach(function(m){
@@ -1143,7 +1430,7 @@ function extractCSD(blocks, pageNo, fsMode){
       allMatches(RE_PIPE, L).forEach(function(m){
         S.pipes.push({sys:+m[1], liq:parseFloat(m[2]), gas:parseFloat(m[3]),
                       ref:e?e.ref:null, datum:e?e.datum:null, elev:e?e.v:null,
-                      x:B.x, y:B.y, bb:B.bb, raw:L + (perLine[li]?'':' \u2190 ' + (e?(e.ref+':'+e.datum+'+'+e.v):''))});
+                      x:B.x, y:B.y, bb:B.bb, th:B.h, raw:L + (perLine[li]?'':' \u2190 ' + (e?(e.ref+':'+e.datum+'+'+e.v):''))});
       });
 
       var claimed = [];
@@ -1151,7 +1438,7 @@ function extractCSD(blocks, pageNo, fsMode){
         claimed.push(m.index);
         S.services.push({sys:m[1].replace(/\s+/g,' ').toUpperCase(), w:+m[2], h:+m[3], dia:null,
                          ref:e?e.ref:null, datum:e?e.datum:null, elev:e?e.v:null,
-                         x:B.x, y:B.y, bb:B.bb, raw:L});
+                         x:B.x, y:B.y, bb:B.bb, th:B.h, raw:L});
       });
 
       var fsClaimed = [];
@@ -1161,7 +1448,7 @@ function extractCSD(blocks, pageNo, fsMode){
         fsClaimed.push(m.index);
         S.services.push({sys:m[1].toUpperCase(), w:null, h:null, dia:dn,
                          ref:e?e.ref:null, datum:e?e.datum:null, elev:e?e.v:null,
-                         x:B.x, y:B.y, bb:B.bb, raw:L});
+                         x:B.x, y:B.y, bb:B.bb, th:B.h, raw:L});
       });
       if(fsMode){
         /* Only skip a size the coded patterns already consumed on this same
@@ -1173,13 +1460,29 @@ function extractCSD(blocks, pageNo, fsMode){
           if(fsClaimed.some(function(ix){ return Math.abs(ix - m.index) < 6; })) return;
           S.services.push({sys:'?', w:null, h:null, dia:dn, sizeOnly:true,
                            ref:e?e.ref:null, datum:e?e.datum:null, elev:e?e.v:null,
-                           x:B.x, y:B.y, bb:B.bb, raw:L});
+                           x:B.x, y:B.y, bb:B.bb, th:B.h, raw:L});
         });
       }
       allMatches(RE_FS_TRK, L).forEach(function(m){
         S.services.push({sys:m[1].toUpperCase(), w:+m[2], h:+m[3], dia:null,
                          ref:e?e.ref:null, datum:e?e.datum:null, elev:e?e.v:null,
-                         x:B.x, y:B.y, bb:B.bb, raw:L});
+                         x:B.x, y:B.y, bb:B.bb, th:B.h, raw:L});
+      });
+
+      /* Written-out containment: the name is the system, the finish rides along
+         as the material so a comment can still quote the label as drawn. */
+      allMatches(RE_EL_TRAY, L).forEach(function(m){
+        S.services.push({sys:m[1].replace(/\s+/g,' ').toUpperCase(), w:+m[2], h:+m[3], dia:null,
+                         /* Periods out: the finish is a field to compare on, and
+                            the sheet writes it both H.D.G and HDG. */
+                         mat:m[4] ? m[4].toUpperCase().replace(/\./g,'') : null,
+                         ref:e?e.ref:null, datum:e?e.datum:null, elev:e?e.v:null,
+                         x:B.x, y:B.y, bb:B.bb, th:B.h, raw:L});
+      });
+      allMatches(RE_EL_COND, L).forEach(function(m){
+        S.services.push({sys:m[1].toUpperCase(), w:null, h:null, dia:+m[2],
+                         ref:e?e.ref:null, datum:e?e.datum:null, elev:e?e.v:null,
+                         x:B.x, y:B.y, bb:B.bb, th:B.h, raw:L});
       });
 
       if(isPipeLine) return;
@@ -1189,7 +1492,7 @@ function extractCSD(blocks, pageNo, fsMode){
         if(dia < 50) return;
         S.services.push({sys:m[1].replace(/\s+/g,' ').toUpperCase(), w:null, h:null, dia:dia,
                          ref:e?e.ref:null, datum:e?e.datum:null, elev:e?e.v:null,
-                         x:B.x, y:B.y, bb:B.bb, raw:L});
+                         x:B.x, y:B.y, bb:B.bb, th:B.h, raw:L});
       });
     });
 
@@ -1201,7 +1504,7 @@ function extractCSD(blocks, pageNo, fsMode){
 
     // fan data
     var cm = flat.match(RE_CMH), pa = flat.match(RE_PA);
-    if(cm || pa){ S.fans.push({cmh:cm?+cm[1]:null, pa:pa?+pa[1]:null, x:B.x, y:B.y, bb:B.bb, raw:flat}); }
+    if(cm || pa){ S.fans.push({cmh:cm?+cm[1]:null, pa:pa?+pa[1]:null, x:B.x, y:B.y, bb:B.bb, th:B.h, raw:flat}); }
   });
 
   // attach fan data to nearest EF/PEF/SME tag
@@ -1229,6 +1532,7 @@ function extractCSD(blocks, pageNo, fsMode){
     }
     S.subLabel = w.join(' ').replace(/^[-\u2014\s]+/,'').slice(0, 70);
   }
+  S.cal = calibrate(blocks);
   S.label = S.zone != null ? ('ZONE ' + S.zone) : (S.dwg || ('PAGE ' + pageNo));
   return S;
 }
@@ -1497,6 +1801,65 @@ RULES.push(function(S){
       'Bổ sung mặt cắt qua vùng này.','Add a section through this area.',
       C.map(function(o){ return o.src; })));
   });
+  return out;
+});
+
+/* R07c — giao cắt đọc thẳng từ nét vẽ.
+   CL-01 chỉ dám nói "cùng dải cao độ, đi soi mặt cắt" vì lớp text không biết
+   tuyến chạy đi đâu. Có nét vẽ thì trả lời được câu hỏi thật: hai tuyến này có
+   cắt nhau trên mặt bằng không, và tại đó chúng có chồng nhau theo phương đứng
+   không. Chiều cao lấy từ chính kích thước ống, gốc cao độ lấy từ tiền tố
+   BOD/TOD, nên đây là va chạm 2.5D — mặt bằng thật + cao độ ghi trên nhãn. */
+RULES.push(function(S){
+  if(!S.geom || !S.geom.lines.length) return [];
+  var runs = S.services.filter(function(s){ return s.line && vExtent(s); });
+  if(runs.length < 2) return [];
+  var out = [], seen = {}, work = 0;
+  for(var i=0;i<runs.length && work < 200000;i++){
+    for(var j=i+1;j<runs.length && work < 200000;j++){
+      work++;
+      var A = runs[i], B = runs[j];
+      if(A.line === B.line) continue;      // one run carrying two labels
+      if(A.sys === B.sys) continue;        // a tee inside one system is not a clash
+      var key = Math.min(A.line.id, B.line.id) + '|' + Math.max(A.line.id, B.line.id);
+      if(seen[key]) continue;
+      var ea = vExtent(A), eb = vExtent(B);
+      /* Positive = clear air between them, negative = they occupy the same
+         height. Anything over 100 mm apart needs no comment. */
+      var gap = Math.max(ea.lo, eb.lo) - Math.min(ea.hi, eb.hi);
+      if(gap > 100) continue;
+      var P = lineCross(A.line, B.line);
+      if(!P) continue;
+      seen[key] = 1;
+      var hit = gap < 0;
+      /* The finding is about the crossing itself, so it is located there rather
+         than across both labels — the viewer then boxes the spot on the sheet
+         and the grid reference names that spot, not the span between them. */
+      var at = {x:P.x, y:P.y,
+                bb:{bx0:P.x-14, by0:P.y-14, bx1:P.x+14, by1:P.y+14}};
+      var ev = fmtSvc(A) + '  (' + ea.lo + '→' + ea.hi + ' mm)\n' +
+               fmtSvc(B) + '  (' + eb.lo + '→' + eb.hi + ' mm)\n' +
+               (hit ? ('Chồng nhau / overlap ' + Math.abs(gap) + ' mm')
+                    : ('Khe hở / clearance ' + gap + ' mm'));
+      out.push(F(hit ? 'GX-01' : 'GX-02', hit ? 'E' : 'W', S,
+        hit
+          ? 'Hai tuyến cắt nhau trên mặt bằng và chồng nhau theo phương đứng ' + Math.abs(gap) + ' mm: ' +
+            fmtSvc(A) + ' và ' + fmtSvc(B) + '. Ở vị trí giao, hai tuyến cùng chiếm một khoảng cao độ nên không thể lắp cả hai như đang vẽ.'
+          : 'Hai tuyến cắt nhau trên mặt bằng, khe hở đứng chỉ ' + gap + ' mm: ' +
+            fmtSvc(A) + ' và ' + fmtSvc(B) + '. Không đủ chỗ cho bảo ôn, ty treo và dung sai thi công.',
+        hit
+          ? 'Two runs cross in plan and overlap vertically by ' + Math.abs(gap) + ' mm: ' +
+            fmtSvc(A) + ' and ' + fmtSvc(B) + '. At the crossing both occupy the same height, so they cannot both be installed as drawn.'
+          : 'Two runs cross in plan with only ' + gap + ' mm of vertical clearance: ' +
+            fmtSvc(A) + ' and ' + fmtSvc(B) + '. That leaves no room for insulation, hangers and site tolerance.',
+        ev,
+        hit ? 'Hạ hoặc nâng một trong hai tuyến tại điểm giao, hoặc nắn tuyến tránh nhau. Bổ sung mặt cắt tại đây.'
+            : 'Kiểm tra bề dày bảo ôn và chi tiết treo tại điểm giao.',
+        hit ? 'Drop or raise one of the runs at the crossing, or reroute. Add a section here.'
+            : 'Check the insulation thickness and hanger detail at the crossing.',
+        [at]));
+    }
+  }
   return out;
 });
 
@@ -2308,6 +2671,7 @@ function render(){
         '<div><div class="k">Type</div><div class="v">'+esc(S.family)+'</div></div>' +
         '<div><div class="k">Page</div><div class="v">'+S.page+'</div></div>' +
         '<div><div class="k">Labels</div><div class="v">'+nLabels+'</div></div>' +
+        '<div><div class="k">Runs</div><div class="v">'+(S.geom ? (S.geom.bound||0)+'/'+S.geom.total : '\u2014')+'</div></div>' +
         '<div><div class="k">Items</div><div class="v">'+(S.findings||[]).length+'</div></div>' +
       '</div></div>';
 
@@ -2378,6 +2742,8 @@ var CODE_TITLES = {
   'RK-01':{vi:'Bậc thu máng ống gas',en:'Rack size sequence'},
   'EX-01':{vi:'Xả cạnh hút gió tươi',en:'Discharge near intake'},
   'CL-01':{vi:'Chồng dải cao độ',en:'Overlapping elevation band'},
+  'GX-01':{vi:'Va chạm tại điểm giao',en:'Clash at crossing'},
+  'GX-02':{vi:'Khe hở đứng quá nhỏ',en:'Tight vertical clearance'},
   'AV-01':{vi:'Vận tốc gió',en:'Air velocity'},
   'MI-01':{vi:'Thiếu cao độ',en:'Missing elevation'},
   'MI-02':{vi:'Thiếu thông số quạt',en:'Missing fan data'},
@@ -2420,21 +2786,23 @@ function dataDrawer(S){
     return d;
   }
   S.services.forEach(function(s){
+    var mm = runLengthMm(S, s);
     rows += '<tr><td>'+esc(s.sys)+'</td><td>'+(s.dia?('\u00d8'+s.dia):(s.w+'\u00d7'+s.h))+'</td>' +
-            '<td>'+esc(s.ref||'—')+'</td><td>'+esc(s.datum||'—')+'</td><td>'+(s.elev!=null?('+'+s.elev):'—')+'</td></tr>';
+            '<td>'+esc(s.ref||'—')+'</td><td>'+esc(s.datum||'—')+'</td><td>'+(s.elev!=null?('+'+s.elev):'—')+'</td>' +
+            '<td>'+(mm!=null?mm.toLocaleString('en-US'):(s.line?'?':'—'))+'</td></tr>';
   });
   S.pipes.forEach(function(p){
     rows += '<tr><td>R-'+p.sys+'</td><td>'+p.liq+'/'+p.gas+'</td><td>'+esc(p.ref||'—')+'</td>' +
-            '<td>'+esc(p.datum||'—')+'</td><td>'+(p.elev!=null?('+'+p.elev):'—')+'</td></tr>';
+            '<td>'+esc(p.datum||'—')+'</td><td>'+(p.elev!=null?('+'+p.elev):'—')+'</td><td>—</td></tr>';
   });
   S.tags.forEach(function(T){
-    rows += '<tr><td>'+esc(T.type)+'</td><td>'+esc(T.id)+'</td><td colspan="3">' +
+    rows += '<tr><td>'+esc(T.type)+'</td><td>'+esc(T.id)+'</td><td colspan="4">' +
             (T.cmh?(T.cmh+' CMH'):'') + (T.pa?(' / '+T.pa+' Pa'):'') + '</td></tr>';
   });
   d.innerHTML = '<summary>'+esc(t('dataDrawer'))+' — '+esc(S.label)+'</summary>' +
     '<div class="inner">' + chromeNote(S) + '<table class="raw"><thead><tr>' +
-    '<th>System</th><th>Size</th><th>Ref</th><th>Datum</th><th>Elev</th></tr></thead><tbody>' +
-    (rows || '<tr><td colspan="5">—</td></tr>') + '</tbody></table></div>';
+    '<th>System</th><th>Size</th><th>Ref</th><th>Datum</th><th>Elev</th><th>'+esc(t('colLen'))+'</th></tr></thead><tbody>' +
+    (rows || '<tr><td colspan="6">—</td></tr>') + '</tbody></table></div>';
   return d;
 }
 
@@ -2876,6 +3244,17 @@ function exportTxt(){
     L.push('BLOCKS ' + S.blocks + '   SERVICES ' + S.services.length +
            '   PIPES ' + S.pipes.length + '   TAGS ' + S.tags.length +
            '   SKIPPED ' + ((S.chrome||[]).length));
+    /* The linework summary is what makes a report about an unrecognised sheet
+       actionable: it separates "the lines were not read" from "the lines were
+       read but no label claimed one". */
+    if(S.geom){
+      L.push('LINEWORK ' + S.geom.total + ' runs   BOUND ' + (S.geom.bound||0) +
+             '   SPAN ' + Math.round(S.geom.span) + ' units' +
+             (S.cal ? ('   SCALE ' + S.cal.mmPerUnit.toFixed(2) + ' mm/unit') : '   SCALE none') +
+             (S.geom.clipped ? '   [TRUNCATED]' : ''));
+    } else {
+      L.push('LINEWORK none');
+    }
     L.push('==================================================================');
     (S.rawText || []).forEach(function(txt, i){
       if(txt && txt.trim()) L.push(String(i+1).padStart(4,'0') + '  ' + txt);
@@ -2934,6 +3313,12 @@ async function handleFiles(list){
         var S = extract(blocks, p, items);
         if(files.length > 1) S.file = file.name;
         S.pdf = pdf;   // kept so the viewer can re-render this page on demand
+        /* Linework is read after the text so a failure here costs the geometry
+           checks and nothing else — the sheet still gets its full text review. */
+        try {
+          S.geom = await readGeometry(page);
+          bindGeometry(S);
+        } catch(e){ S.geom = null; }
         /* A page that parses to nothing used to vanish, leaving the person
            staring at a zero. Keep it and say why it could not be read. */
         if(S.family === 'UNKNOWN' && S.blocks < 12) continue;   // cover / index page

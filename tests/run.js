@@ -72,7 +72,8 @@ async function load(browser, base, pdf) {
     return { family: S.family, cal: S.cal && +S.cal.mmPerUnit.toFixed(2),
       total: S.geom.total, bound: S.geom.bound, svc: m,
       gx: S.findings.filter(f => /^GX/.test(f.code)).map(f => ({ c: f.code, sev: f.sev, at: f.at })),
-      clashPts: (S.clashPts || []).length };
+      gxBox: (S.findings.filter(f => f.code === 'GX-01')[0] || {}).boxes,
+      gxRect: (S.findings.filter(f => f.code === 'GX-01')[0] || {}).rect };
   });
   ck('family', r.family, 'CSD');
   near('scale mm/unit', r.cal, 30, 0.01);
@@ -87,22 +88,23 @@ async function load(browser, base, pdf) {
   ck('one hard clash', r.gx.filter(f => f.c === 'GX-01').length, 1);
   ck('clash severity', r.gx[0] && r.gx[0].sev, 'E');
   ck('clash grid reference', r.gx[0] && r.gx[0].at, 'DX2 / DY2');
-  ck('clash point recorded for the preview', r.clashPts, 1);
+  /* The crossing is at (300,600) in PDF user space; the viewer boxes it there. */
+  ck('clash carries one box for the viewer', r.gxBox && r.gxBox.length, 1);
+  ck('box sits on the crossing', r.gxRect &&
+    [r.gxRect.bx0, r.gxRect.by0, r.gxRect.bx1, r.gxRect.by1], [286, 586, 314, 614]);
 
-  /* ---- 2. the preview actually draws ----------------------------------- */
-  console.log('\n== preview canvas ==');
-  await page.click('details.data summary');
-  await page.waitForTimeout(400);
-  const cv = await page.evaluate(() => {
-    const c = document.querySelector('canvas.geo');
-    if (!c) return null;
-    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-    let ink = 0;
-    for (let i = 0; i < d.length; i += 4) if (d[i] < 240 || d[i+1] < 240 || d[i+2] < 240) ink++;
-    return { w: c.width, ink };
+  /* ---- 2. the sheet viewer can locate the clash ------------------------ */
+  console.log('\n== on-sheet viewer ==');
+  const vw = await page.evaluate(() => {
+    const S = SHEETS[0];
+    const located = locatedOnSheet(S);
+    const gx = S.findings.findIndex(f => f.code === 'GX-01');
+    return { located: located.length > 0, clashLocated: located.indexOf(gx) >= 0,
+             hasPdf: !!S.pdf };
   });
-  ck('canvas present', !!cv, true);
-  ck('canvas has linework drawn on it', !!(cv && cv.ink > 1000), true);
+  ck('the sheet keeps its pdf for the viewer', vw.hasPdf, true);
+  ck('findings are locatable on the sheet', vw.located, true);
+  ck('the clash is one of them', vw.clashLocated, true);
   await page.close();
 
   /* ---- 3. CTM and form XObject ----------------------------------------- */
@@ -124,30 +126,30 @@ async function load(browser, base, pdf) {
   ck('clash found through both transforms', r.gx, ['DX2 / DY1']);
   await page.close();
 
-  /* ---- 4. drawer variants, including sheets with no geometry ----------- */
-  console.log('\n== drawer variants ==');
+  /* ---- 4. data drawer, including a sheet with no linework ------------- */
+  console.log('\n== data drawer ==');
   page = await browser.newPage();
   page.on('pageerror', e => { console.log('  [pageerror]', e.message); fails++; });
   await page.goto(base + '/index.html', { waitUntil: 'load' });
   const d = await page.evaluate(() => {
-    const mp = { family: 'MP', page: 1, label: 'SECTION A', dwg: 'X', blocks: 9,
-      pipes: [{ sys: 'WW', mat: 'UPVC', dn: 110, view: 'A' }], valves: [], elevs: [],
-      services: [], tags: [], slopes: [], findings: [], cal: { mmPerUnit: 30 },
-      geom: { total: 1, bound: 0, span: 100,
-        lines: [{ id: 0, pts: [[0,0],[100,0]], len: 100, x0:0, y0:0, x1:100, y1:0 }] } };
     const bare = { family: 'CSD', page: 1, label: 'ZONE 1', blocks: 5,
-      services: [], pipes: [], tags: [], findings: [], geom: null };
+      services: [{ sys: 'CHWS', dia: 100, ref: 'BOD', datum: 'RFL', elev: 2500 }],
+      pipes: [], tags: [], findings: [], geom: null, cal: null };
+    const withGeom = JSON.parse(JSON.stringify(bare));
+    withGeom.cal = { mmPerUnit: 30 };
+    withGeom.services[0].line = { id: 0, len: 200 };
+    const head = dataDrawer(bare).querySelectorAll('th');
     return {
-      mpCanvas: !!dataDrawer(mp).querySelector('canvas.geo'),
-      mpLegend: !!dataDrawer(mp).querySelector('.geo-key'),
-      bareSaysSo: !!dataDrawer(bare).querySelector('.geo-empty'),
-      bareNoCanvas: !!dataDrawer(bare).querySelector('canvas.geo')
+      cols: head.length,
+      lastCol: head[head.length - 1].textContent,
+      bareLen: dataDrawer(bare).querySelectorAll('tbody td')[5].textContent,
+      geomLen: dataDrawer(withGeom).querySelectorAll('tbody td')[5].textContent
     };
   });
-  ck('MP drawer carries the preview', d.mpCanvas, true);
-  ck('MP drawer carries the legend', d.mpLegend, true);
-  ck('sheet without linework says so', d.bareSaysSo, true);
-  ck('sheet without linework draws nothing', d.bareNoCanvas, false);
+  ck('drawer carries the length column', d.cols, 6);
+  ck('length column is labelled', /mm/.test(d.lastCol), true);
+  ck('unbound run shows no length', d.bareLen, '\u2014');
+  ck('bound run shows its measured length', d.geomLen, '6,000');
 
   /* ---- 5. electrical containment vocabulary ---------------------------
      The strings below are copied verbatim from a real lighting shop drawing
